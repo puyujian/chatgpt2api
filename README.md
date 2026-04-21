@@ -8,6 +8,7 @@ ChatGPT 图片生成代理与账号池管理面板，提供账号维护、额度
 
 - 兼容 OpenAI `Chat Completions` 图片响应
 - 兼容 OpenAI `Responses API` 图片生成接口
+- 支持图生图与参考图编辑
 - 支持导入 CPA 格式文件
 - 支持多种方式导入 `access_token`
 - 自动刷新账号邮箱、类型、图片额度、恢复时间
@@ -15,7 +16,7 @@ ChatGPT 图片生成代理与账号池管理面板，提供账号维护、额度
 - 失效 Token 自动剔除
 - 提供 Web 后台管理账号和生成图片 
 
-> 目前仅实现了生图效果，编辑图片以及gpt-image-2模型尚未实现，需要后续更新。
+> 当前已支持文生图和图生图。`gpt-image-2` 仍未单独适配，默认仍走现有 ChatGPT 上游模型映射。
 
 生图界面：
 
@@ -44,6 +45,10 @@ POST /v1/images/generations
 ```
 
 ```http
+POST /v1/images/edits
+```
+
+```http
 POST /v1/chat/completions
 ```
 
@@ -61,6 +66,27 @@ POST /v1/responses
   "response_format": "b64_json"
 }
 ```
+
+图生图请求体示例：
+
+```json
+{
+  "prompt": "保留主体动作，改成电影海报质感",
+  "model": "gpt-image-1",
+  "images": [
+    {
+      "name": "source.png",
+      "image_url": "data:image/png;base64,<base64>"
+    }
+  ]
+}
+```
+
+说明：
+
+- `/v1/images/edits` 当前支持 JSON 方式传入参考图，`image` 或 `images` 都可以，值支持远程 URL 或 data URL。
+- `/v1/chat/completions` 支持在 `messages[].content` 里带 `image_url`。
+- `/v1/responses` 支持在 `input[].content` 里带 `input_image`。
 
 ## 部署
 

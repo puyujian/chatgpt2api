@@ -11,6 +11,12 @@ export type StoredImage = {
   error?: string;
 };
 
+export type StoredReferenceImage = {
+  id: string;
+  name: string;
+  data_url: string;
+};
+
 export type ImageConversationStatus = "generating" | "success" | "error";
 
 export type ImageConversation = {
@@ -19,6 +25,7 @@ export type ImageConversation = {
   prompt: string;
   model: ImageModel;
   count: number;
+  referenceImages: StoredReferenceImage[];
   images: StoredImage[];
   createdAt: string;
   status: ImageConversationStatus;
@@ -45,6 +52,7 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
 function normalizeConversation(conversation: ImageConversation): ImageConversation {
   return {
     ...conversation,
+    referenceImages: Array.isArray(conversation.referenceImages) ? conversation.referenceImages : [],
     images: (conversation.images || []).map(normalizeStoredImage),
   };
 }

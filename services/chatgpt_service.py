@@ -7,9 +7,11 @@ from services.cpa_service import cpa_service
 from services.image_service import ImageGenerationError, generate_image_result, is_token_invalid_error
 from services.utils import (
     build_chat_image_completion,
-    extract_chat_prompt,
-    extract_response_prompt,
+    extract_chat_prompt_and_images,
+    extract_generation_images,
+    extract_response_prompt_and_images,
     has_response_image_generation_tool,
+    InputImage,
     is_image_chat_request,
     parse_image_count,
 )
@@ -19,7 +21,14 @@ class ChatGPTService:
     def __init__(self, account_service: AccountService):
         self.account_service = account_service
 
-    def _generate_single_image_with_local_pool(self, prompt: str, model: str, index: int, total: int) -> dict[str, object]:
+    def _generate_single_image_with_local_pool(
+        self,
+        prompt: str,
+        model: str,
+        index: int,
+        total: int,
+        input_images: list[InputImage] | None = None,
+    ) -> dict[str, object]:
         while True:
             try:
                 request_token = self.account_service.get_available_access_token()
@@ -29,7 +38,7 @@ class ChatGPTService:
 
             print(f"[image-generate] start pooled token={request_token[:12]}... model={model} index={index}/{total}")
             try:
-                result = generate_image_result(request_token, prompt, model)
+                result = generate_image_result(request_token, prompt, model, input_images=input_images)
                 account = self.account_service.mark_image_result(request_token, success=True)
                 print(
                     f"[image-generate] success pooled token={request_token[:12]}... "
@@ -49,7 +58,14 @@ class ChatGPTService:
                     continue
                 raise
 
-    def _generate_single_image_with_cpa(self, prompt: str, model: str, index: int, total: int) -> dict[str, object]:
+    def _generate_single_image_with_cpa(
+        self,
+        prompt: str,
+        model: str,
+        index: int,
+        total: int,
+        input_images: list[InputImage] | None = None,
+    ) -> dict[str, object]:
         attempted_tokens: set[str] = set()
         while True:
             request_token = cpa_service.get_token(excluded_tokens=attempted_tokens)
@@ -59,7 +75,7 @@ class ChatGPTService:
             attempted_tokens.add(request_token)
             print(f"[image-generate] start cpa token={request_token[:12]}... model={model} index={index}/{total}")
             try:
-                result = generate_image_result(request_token, prompt, model)
+                result = generate_image_result(request_token, prompt, model, input_images=input_images)
                 print(f"[image-generate] success cpa token={request_token[:12]}...")
                 return result
             except ImageGenerationError as exc:
@@ -70,15 +86,21 @@ class ChatGPTService:
                     continue
                 raise
 
-    def generate_with_pool(self, prompt: str, model: str, n: int):
+    def generate_with_pool(
+        self,
+        prompt: str,
+        model: str,
+        n: int,
+        input_images: list[InputImage] | None = None,
+    ):
         created = None
         image_items: list[dict[str, object]] = []
 
         for index in range(1, n + 1):
             if cpa_service.enabled:
-                result = self._generate_single_image_with_cpa(prompt, model, index, n)
+                result = self._generate_single_image_with_cpa(prompt, model, index, n, input_images)
             else:
-                result = self._generate_single_image_with_local_pool(prompt, model, index, n)
+                result = self._generate_single_image_with_local_pool(prompt, model, index, n, input_images)
 
             if created is None:
                 created = result.get("created")
@@ -94,6 +116,20 @@ class ChatGPTService:
             "data": image_items,
         }
 
+    def create_image_generation(self, body: dict[str, object], *, require_input_images: bool = False) -> dict[str, object]:
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            raise HTTPException(status_code=400, detail={"error": "prompt is required"})
+
+        model = str(body.get("model") or "gpt-image-1").strip() or "gpt-image-1"
+        n = parse_image_count(body.get("n"))
+        input_images = extract_generation_images(body, require_image=require_input_images)
+
+        try:
+            return self.generate_with_pool(prompt, model, n, input_images)
+        except ImageGenerationError as exc:
+            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+
     def create_image_completion(self, body: dict[str, object]) -> dict[str, object]:
         if not is_image_chat_request(body):
             raise HTTPException(
@@ -106,12 +142,12 @@ class ChatGPTService:
 
         model = str(body.get("model") or "gpt-image-1").strip() or "gpt-image-1"
         n = parse_image_count(body.get("n"))
-        prompt = extract_chat_prompt(body)
+        prompt, input_images = extract_chat_prompt_and_images(body)
         if not prompt:
             raise HTTPException(status_code=400, detail={"error": "prompt is required"})
 
         try:
-            image_result = self.generate_with_pool(prompt, model, n)
+            image_result = self.generate_with_pool(prompt, model, n, input_images)
         except ImageGenerationError as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
@@ -127,13 +163,13 @@ class ChatGPTService:
                 detail={"error": "only image_generation tool requests are supported on this endpoint"},
             )
 
-        prompt = extract_response_prompt(body.get("input"))
+        prompt, input_images = extract_response_prompt_and_images(body.get("input"))
         if not prompt:
             raise HTTPException(status_code=400, detail={"error": "input text is required"})
 
         model = str(body.get("model") or "gpt-5").strip() or "gpt-5"
         try:
-            image_result = self.generate_with_pool(prompt, "gpt-image-1", 1)
+            image_result = self.generate_with_pool(prompt, "gpt-image-1", 1, input_images)
         except ImageGenerationError as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 

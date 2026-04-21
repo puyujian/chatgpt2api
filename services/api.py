@@ -14,7 +14,6 @@ from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService
 from services.config import config
 from services.cpa_service import cpa_config, cpa_service, fetch_pool_status, fetch_tokens_for_pool
-from services.image_service import ImageGenerationError
 from services.version import get_app_version
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -22,11 +21,15 @@ WEB_DIST_DIR = BASE_DIR / "web_dist"
 
 
 class ImageGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     prompt: str = Field(..., min_length=1)
-    model: str = "gpt-4o"
+    model: str = "gpt-image-1"
     n: int = Field(default=1, ge=1, le=4)
     response_format: str = "b64_json"
     history_disabled: bool = True
+    image: object | None = None
+    images: list[object] | None = None
 
 
 class AccountCreateRequest(BaseModel):
@@ -234,10 +237,16 @@ def create_app() -> FastAPI:
     @router.post("/v1/images/generations")
     async def generate_images(body: ImageGenerationRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
-        try:
-            return await run_in_threadpool(chatgpt_service.generate_with_pool, body.prompt, body.model, body.n)
-        except ImageGenerationError as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+        return await run_in_threadpool(chatgpt_service.create_image_generation, body.model_dump(mode="python"))
+
+    @router.post("/v1/images/edits")
+    async def edit_images(body: ImageGenerationRequest, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        return await run_in_threadpool(
+            chatgpt_service.create_image_generation,
+            body.model_dump(mode="python"),
+            require_input_images=True,
+        )
 
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):

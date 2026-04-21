@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, LoaderCircle, MessageSquarePlus, Trash2 } from "lucide-react";
+import { ArrowUp, ImagePlus, LoaderCircle, MessageSquarePlus, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ import {
   saveImageConversation,
   type ImageConversation,
   type StoredImage,
+  type StoredReferenceImage,
 } from "@/store/image-conversations";
 import { cn } from "@/lib/utils";
 
@@ -88,11 +89,28 @@ async function normalizeConversationHistory(items: ImageConversation[]) {
   return normalized;
 }
 
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string" && reader.result) {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("读取图片失败"));
+    };
+    reader.onerror = () => reject(new Error("读取图片失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function ImagePage() {
   const didLoadQuotaRef = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
   const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-1");
+  const [referenceImages, setReferenceImages] = useState<StoredReferenceImage[]>([]);
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
@@ -204,7 +222,36 @@ export default function ImagePage() {
   const handleCreateDraft = () => {
     setSelectedConversationId(null);
     setImagePrompt("");
+    setReferenceImages([]);
     textareaRef.current?.focus();
+  };
+
+  const handleReferenceImageChange = async (fileList: FileList | null) => {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) {
+      return;
+    }
+
+    try {
+      const uploaded = await Promise.all(
+        files.slice(0, 4).map(async (file) => ({
+          id:
+            typeof crypto !== "undefined" && "randomUUID" in crypto
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          name: file.name,
+          data_url: await readFileAsDataUrl(file),
+        })),
+      );
+      setReferenceImages((prev) => [...prev, ...uploaded].slice(0, 4));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "读取参考图失败";
+      toast.error(message);
+    }
+  };
+
+  const handleRemoveReferenceImage = (id: string) => {
+    setReferenceImages((prev) => prev.filter((item) => item.id !== id));
   };
 
   const handleDeleteConversation = async (id: string) => {
@@ -252,6 +299,7 @@ export default function ImagePage() {
       prompt,
       model: imageModel,
       count: parsedCount,
+      referenceImages: [...referenceImages],
       images: Array.from({ length: parsedCount }, (_, index) => ({
         id: `${conversationId}-${index}`,
         status: "loading" as const,
@@ -263,13 +311,21 @@ export default function ImagePage() {
     setIsGenerating(true);
     setSelectedConversationId(conversationId);
     setImagePrompt("");
+    setReferenceImages([]);
 
     try {
       await persistConversation(draftConversation);
 
       const tasks = Array.from({ length: parsedCount }, async (_, index) => {
         try {
-          const data = await generateImage(prompt, imageModel);
+          const data = await generateImage(
+            prompt,
+            imageModel,
+            draftConversation.referenceImages.map((image) => ({
+              data_url: image.data_url,
+              name: image.name,
+            })),
+          );
           const first = data.data?.[0];
           if (!first?.b64_json) {
             throw new Error(`第 ${index + 1} 张没有返回图片数据`);
@@ -455,6 +511,11 @@ export default function ImagePage() {
                     <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-stone-500">
                       <span className="rounded-full bg-stone-100 px-3 py-1">{selectedConversation.model}</span>
                       <span className="rounded-full bg-stone-100 px-3 py-1">{selectedConversation.count} 张</span>
+                      {selectedConversation.referenceImages.length > 0 ? (
+                        <span className="rounded-full bg-stone-100 px-3 py-1">
+                          参考图 {selectedConversation.referenceImages.length} 张
+                        </span>
+                      ) : null}
                       <span className="rounded-full bg-stone-100 px-3 py-1">
                         {formatConversationTime(selectedConversation.createdAt)}
                       </span>
@@ -463,6 +524,29 @@ export default function ImagePage() {
                     {selectedConversation.status === "error" && selectedConversation.images.length === 0 ? (
                       <div className="border-l-2 border-rose-300 bg-rose-50/70 px-4 py-4 text-sm leading-6 text-rose-600">
                         {selectedConversation.error || "生成失败"}
+                      </div>
+                    ) : null}
+
+                    {selectedConversation.referenceImages.length > 0 ? (
+                      <div className="mb-5">
+                        <div className="mb-2 text-xs font-medium tracking-[0.12em] text-stone-400 uppercase">
+                          Reference
+                        </div>
+                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                          {selectedConversation.referenceImages.map((image) => (
+                            <div key={image.id} className="overflow-hidden rounded-[18px] border border-stone-200 bg-stone-50">
+                              <Image
+                                src={image.data_url}
+                                alt={image.name}
+                                width={320}
+                                height={320}
+                                unoptimized
+                                className="block aspect-square h-auto w-full object-cover"
+                              />
+                              <div className="truncate px-3 py-2 text-xs text-stone-500">{image.name}</div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     ) : null}
 
@@ -534,11 +618,66 @@ export default function ImagePage() {
                   className="min-h-[148px] resize-none rounded-[32px] border-0 bg-transparent px-6 pt-6 pb-20 text-[15px] leading-7 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0"
                 />
 
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => {
+                    void handleReferenceImageChange(event.target.files);
+                    event.target.value = "";
+                  }}
+                />
+
+                {referenceImages.length > 0 ? (
+                  <div className="absolute inset-x-0 bottom-20 flex gap-3 overflow-x-auto px-6 pb-2">
+                    {referenceImages.map((image) => (
+                      <div
+                        key={image.id}
+                        className="relative h-20 w-20 shrink-0 overflow-hidden rounded-2xl border border-stone-200 bg-stone-100"
+                      >
+                        <Image
+                          src={image.data_url}
+                          alt={image.name}
+                          width={160}
+                          height={160}
+                          unoptimized
+                          className="h-full w-full object-cover"
+                        />
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleRemoveReferenceImage(image.id);
+                          }}
+                          className="absolute top-1 right-1 inline-flex size-6 items-center justify-center rounded-full bg-black/60 text-white transition hover:bg-black/80"
+                          aria-label={`删除参考图 ${image.name}`}
+                        >
+                          <X className="size-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
                 <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-white via-white/95 to-transparent px-4 pb-4 pt-10 sm:px-6">
                   <div className="flex items-center gap-3">
                     <div className="rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600">
                       剩余额度 {availableQuota}
                     </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-10 rounded-full border-stone-200 bg-white px-4 text-sm font-medium text-stone-700 shadow-none hover:bg-stone-50"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        fileInputRef.current?.click();
+                      }}
+                    >
+                      <ImagePlus className="size-4" />
+                      参考图
+                    </Button>
                     <Select value={imageModel} onValueChange={(value) => setImageModel(value as ImageModel)}>
                       <SelectTrigger className="h-10 w-[164px] rounded-full border-stone-200 bg-white text-sm font-medium text-stone-700 shadow-none focus-visible:ring-0">
                         <SelectValue />

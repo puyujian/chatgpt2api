@@ -13,6 +13,7 @@ from curl_cffi.requests import Session
 
 from services.account_service import account_service
 from services import proof_of_work
+from services.utils import InputImage
 
 
 BASE_URL = "https://chatgpt.com"
@@ -23,6 +24,11 @@ USER_AGENT = (
 )
 DEFAULT_MODEL = "gpt-4o"
 MAX_POW_ATTEMPTS = 500000
+CLIENT_BUILD_NUMBER = "5955942"
+CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
+TIMEZONE_OFFSET_MIN = -480
+TIMEZONE_NAME = "America/Los_Angeles"
+FILE_USE_CASE = "multimodal"
 
 _CORES = [16, 24, 32]
 _SCREENS = [3000, 4000, 6000]
@@ -57,6 +63,17 @@ class GeneratedImage:
     b64_json: str
     revised_prompt: str
     url: str = ""
+
+
+@dataclass(frozen=True)
+class UploadedImageAsset:
+    file_id: str
+    name: str
+    mime_type: str
+    size_bytes: int
+    width: int
+    height: int
+    source: str
 
 
 def _build_fp(access_token: str) -> dict:
@@ -180,16 +197,26 @@ def _bootstrap(session: Session, fp: dict) -> str:
     return str(fp.get("oai-device-id") or uuid.uuid4())
 
 
+def _base_api_headers(access_token: str, device_id: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "content-type": "application/json",
+        "oai-device-id": device_id,
+        "oai-language": "zh-CN",
+        "oai-client-build-number": CLIENT_BUILD_NUMBER,
+        "oai-client-version": CLIENT_VERSION,
+        "origin": BASE_URL,
+        "referer": BASE_URL + "/",
+    }
+
+
 def _chat_requirements(session: Session, access_token: str, device_id: str) -> tuple[str, Optional[dict]]:
     config = _pow_config(USER_AGENT)
     response = _retry(
         lambda: session.post(
             BASE_URL + "/backend-api/sentinel/chat-requirements",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "oai-device-id": device_id,
-                "content-type": "application/json",
-            },
+            headers=_base_api_headers(access_token, device_id),
             json={"p": _get_requirements_token(config)},
             timeout=30,
         ),
@@ -211,6 +238,118 @@ def is_token_invalid_error(message: str) -> bool:
     )
 
 
+def _upload_input_image(session: Session, access_token: str, device_id: str, image: InputImage) -> UploadedImageAsset:
+    base_headers = _base_api_headers(access_token, device_id)
+    file_request = _retry(
+        lambda: session.post(
+            BASE_URL + "/backend-api/files",
+            headers=base_headers,
+            json={
+                "file_name": image.name,
+                "file_size": image.size_bytes,
+                "use_case": FILE_USE_CASE,
+                "timezone_offset_min": TIMEZONE_OFFSET_MIN,
+            },
+            timeout=30,
+        ),
+        retries=2,
+    )
+    if not file_request.ok:
+        raise ImageGenerationError(file_request.text[:400] or f"file init failed: {file_request.status_code}")
+
+    file_payload = file_request.json() or {}
+    file_id = str(file_payload.get("file_id") or "").strip()
+    upload_url = str(file_payload.get("upload_url") or "").strip()
+    if not file_id or not upload_url:
+        raise ImageGenerationError("invalid upload session")
+
+    upload_response = session.put(
+        upload_url,
+        headers={
+            "content-type": image.mime_type,
+            "x-ms-blob-type": "BlockBlob",
+        },
+        data=image.data,
+        timeout=60,
+    )
+    if not upload_response.ok:
+        raise ImageGenerationError(upload_response.text[:400] or f"file upload failed: {upload_response.status_code}")
+
+    process_request = _retry(
+        lambda: session.post(
+            BASE_URL + "/backend-api/files/process_upload_stream",
+            headers=base_headers,
+            json={
+                "file_id": file_id,
+                "file_name": image.name,
+                "file_size": image.size_bytes,
+                "use_case": FILE_USE_CASE,
+                "timezone_offset_min": TIMEZONE_OFFSET_MIN,
+            },
+            timeout=30,
+        ),
+        retries=2,
+    )
+    if not process_request.ok:
+        raise ImageGenerationError(process_request.text[:400] or f"file process failed: {process_request.status_code}")
+
+    return UploadedImageAsset(
+        file_id=file_id,
+        name=image.name,
+        mime_type=image.mime_type,
+        size_bytes=image.size_bytes,
+        width=image.width,
+        height=image.height,
+        source="local",
+    )
+
+
+def _build_user_message(prompt: str, uploaded_images: list[UploadedImageAsset]) -> dict[str, object]:
+    if not uploaded_images:
+        return {
+            "id": str(uuid.uuid4()),
+            "author": {"role": "user"},
+            "content": {"content_type": "text", "parts": [prompt]},
+            "metadata": {
+                "attachments": [],
+            },
+        }
+
+    parts: list[object] = []
+    attachments: list[dict[str, object]] = []
+    for image in uploaded_images:
+        parts.append(
+            {
+                "content_type": "image_asset_pointer",
+                "asset_pointer": f"file-service://{image.file_id}",
+                "size_bytes": image.size_bytes,
+                "width": image.width,
+                "height": image.height,
+            }
+        )
+        attachments.append(
+            {
+                "id": image.file_id,
+                "size": image.size_bytes,
+                "name": image.name,
+                "mime_type": image.mime_type,
+                "width": image.width,
+                "height": image.height,
+                "source": image.source,
+            }
+        )
+    parts.append(prompt)
+
+    return {
+        "id": str(uuid.uuid4()),
+        "author": {"role": "user"},
+        "content": {"content_type": "multimodal_text", "parts": parts},
+        "metadata": {
+            "attachments": attachments,
+        },
+    }
+
+
 def _send_conversation(
     session: Session,
     access_token: str,
@@ -220,43 +359,28 @@ def _send_conversation(
     parent_message_id: str,
     prompt: str,
     model: str,
+    uploaded_images: list[UploadedImageAsset] | None = None,
 ):
     headers = {
-        "Authorization": f"Bearer {access_token}",
+        **_base_api_headers(access_token, device_id),
         "accept": "text/event-stream",
-        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "content-type": "application/json",
-        "oai-device-id": device_id,
-        "oai-language": "zh-CN",
-        "oai-client-build-number": "5955942",
-        "oai-client-version": "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad",
-        "origin": BASE_URL,
-        "referer": BASE_URL + "/",
         "openai-sentinel-chat-requirements-token": chat_token,
     }
     if proof_token:
         headers["openai-sentinel-proof-token"] = proof_token
+    user_message = _build_user_message(prompt, uploaded_images or [])
     response = _retry(
         lambda: session.post(
             BASE_URL + "/backend-api/conversation",
             headers=headers,
             json={
                 "action": "next",
-                "messages": [
-                    {
-                        "id": str(uuid.uuid4()),
-                        "author": {"role": "user"},
-                        "content": {"content_type": "text", "parts": [prompt]},
-                        "metadata": {
-                            "attachments": [],
-                        },
-                    }
-                ],
+                "messages": [user_message],
                 "parent_message_id": parent_message_id,
                 "model": model,
                 "history_and_training_disabled": False,
-                "timezone_offset_min": -480,
-                "timezone": "America/Los_Angeles",
+                "timezone_offset_min": TIMEZONE_OFFSET_MIN,
+                "timezone": TIMEZONE_NAME,
                 "conversation_mode": {"kind": "primary_assistant"},
                 "conversation_origin": None,
                 "force_paragen": False,
@@ -442,7 +566,12 @@ def _resolve_upstream_model(access_token: str, requested_model: str) -> str:
     return str(requested_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
 
 
-def generate_image_result(access_token: str, prompt: str, model: str = DEFAULT_MODEL) -> dict:
+def generate_image_result(
+    access_token: str,
+    prompt: str,
+    model: str = DEFAULT_MODEL,
+    input_images: list[InputImage] | None = None,
+) -> dict:
     prompt = str(prompt or "").strip()
     access_token = str(access_token or "").strip()
     if not prompt:
@@ -468,6 +597,10 @@ def generate_image_result(access_token: str, prompt: str, model: str = DEFAULT_M
                 proof_config=_pow_config(USER_AGENT),
             )
         parent_message_id = str(uuid.uuid4())
+        uploaded_images = [
+            _upload_input_image(session, access_token, device_id, image)
+            for image in (input_images or [])
+        ]
         response = _send_conversation(
             session,
             access_token,
@@ -477,6 +610,7 @@ def generate_image_result(access_token: str, prompt: str, model: str = DEFAULT_M
             parent_message_id,
             prompt,
             upstream_model,
+            uploaded_images,
         )
         parsed = _parse_sse(response)
         actual_conversation_id = parsed.get("conversation_id") or ""

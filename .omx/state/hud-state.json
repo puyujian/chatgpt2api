@@ -1,6 +1,6 @@
 {
-  "last_turn_at": "2026-04-21T09:42:43.320Z",
-  "turn_count": 5,
-  "last_progress_at": "2026-04-21T09:42:43.320Z",
-  "last_agent_output": "**结果**\n图生图已经接进来了。现在后端支持把参考图传到上游附件链路，前端图片页也能上传参考图并走编辑接口。\n\n**改动**\n- 后端主链路补齐了参考图解析、上传和会话拼装，入口在 [service"
+  "last_turn_at": "2026-04-21T10:02:59.453Z",
+  "turn_count": 8,
+  "last_progress_at": "2026-04-21T10:02:59.453Z",
+  "last_agent_output": "根因已经修掉了。图生图报的这个 400 不是外层 `/v1/images/edits` 参数校验，而是后端把参考图上传到 ChatGPT 上游时，第二步 `process_upload_stream`"
 }

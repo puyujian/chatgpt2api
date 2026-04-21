@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService
 from services.config import config
+from services.cpa_service import cpa_config, cpa_service, fetch_pool_status, fetch_tokens_for_pool
 from services.image_service import ImageGenerationError
 from services.version import get_app_version
 
@@ -45,6 +46,20 @@ class AccountUpdateRequest(BaseModel):
     type: str | None = None
     status: str | None = None
     quota: int | None = None
+
+
+class CPAPoolCreateRequest(BaseModel):
+    name: str = ""
+    base_url: str = ""
+    secret_key: str = ""
+    enabled: bool = True
+
+
+class CPAPoolUpdateRequest(BaseModel):
+    name: str | None = None
+    base_url: str | None = None
+    secret_key: str | None = None
+    enabled: bool | None = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -234,6 +249,82 @@ def create_app() -> FastAPI:
         require_auth_key(authorization)
         return await run_in_threadpool(chatgpt_service.create_response, body.model_dump(mode="python"))
 
+    @router.get("/api/cpa/pools")
+    async def list_cpa_pools(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        return {"pools": cpa_config.list_pools()}
+
+    @router.post("/api/cpa/pools")
+    async def create_cpa_pool(body: CPAPoolCreateRequest, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        if not body.base_url.strip():
+            raise HTTPException(status_code=400, detail={"error": "base_url is required"})
+        if not body.secret_key.strip():
+            raise HTTPException(status_code=400, detail={"error": "secret_key is required"})
+        pool = cpa_config.add_pool(
+            name=body.name,
+            base_url=body.base_url,
+            secret_key=body.secret_key,
+            enabled=body.enabled,
+        )
+        cpa_service.invalidate_cache()
+        return {"pool": pool, "pools": cpa_config.list_pools()}
+
+    @router.post("/api/cpa/pools/{pool_id}")
+    async def update_cpa_pool(
+        pool_id: str,
+        body: CPAPoolUpdateRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        require_auth_key(authorization)
+        pool = cpa_config.update_pool(pool_id, body.model_dump(exclude_none=True))
+        if pool is None:
+            raise HTTPException(status_code=404, detail={"error": "pool not found"})
+        cpa_service.invalidate_cache()
+        return {"pool": pool, "pools": cpa_config.list_pools()}
+
+    @router.delete("/api/cpa/pools/{pool_id}")
+    async def delete_cpa_pool(pool_id: str, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        if not cpa_config.delete_pool(pool_id):
+            raise HTTPException(status_code=404, detail={"error": "pool not found"})
+        cpa_service.invalidate_cache()
+        return {"pools": cpa_config.list_pools()}
+
+    @router.get("/api/cpa/pools/{pool_id}/status")
+    async def cpa_pool_status(pool_id: str, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        pool = cpa_config.get_pool(pool_id)
+        if pool is None:
+            raise HTTPException(status_code=404, detail={"error": "pool not found"})
+        return await run_in_threadpool(fetch_pool_status, pool)
+
+    @router.post("/api/cpa/pools/{pool_id}/sync")
+    async def cpa_pool_sync(pool_id: str, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        pool = cpa_config.get_pool(pool_id)
+        if pool is None:
+            raise HTTPException(status_code=404, detail={"error": "pool not found"})
+        tokens = await run_in_threadpool(fetch_tokens_for_pool, pool)
+        if not tokens:
+            raise HTTPException(status_code=502, detail={"error": "No tokens returned from CPA"})
+        result = account_service.add_accounts(tokens)
+        refresh_result = account_service.refresh_accounts(tokens)
+        return {
+            **result,
+            "refreshed": refresh_result.get("refreshed", 0),
+            "errors": refresh_result.get("errors", []),
+            "items": refresh_result.get("items", result.get("items", [])),
+        }
+
+    @router.get("/api/cpa/status")
+    async def cpa_global_status(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        if not cpa_config.has_usable:
+            return {"enabled": False, "pools": 0, "tokens": 0}
+        tokens = await run_in_threadpool(cpa_service.fetch_all_tokens)
+        return {"enabled": True, "pools": len(cpa_config.usable_pools()), "tokens": len(tokens)}
+
     app.include_router(router)
 
     @app.get("/{full_path:path}", include_in_schema=False)
@@ -241,6 +332,9 @@ def create_app() -> FastAPI:
         asset = resolve_web_asset(full_path)
         if asset is not None:
             return FileResponse(asset)
+
+        if full_path.strip("/").startswith("_next/"):
+            raise HTTPException(status_code=404, detail="Not Found")
 
         fallback = resolve_web_asset("")
         if fallback is None:

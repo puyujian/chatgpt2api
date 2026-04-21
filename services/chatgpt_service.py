@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from services.account_service import AccountService
+from services.cpa_service import cpa_service
 from services.image_service import ImageGenerationError, generate_image_result, is_token_invalid_error
 from services.utils import (
     build_chat_image_completion,
@@ -18,44 +19,72 @@ class ChatGPTService:
     def __init__(self, account_service: AccountService):
         self.account_service = account_service
 
+    def _generate_single_image_with_local_pool(self, prompt: str, model: str, index: int, total: int) -> dict[str, object]:
+        while True:
+            try:
+                request_token = self.account_service.get_available_access_token()
+            except RuntimeError as exc:
+                print(f"[image-generate] stop index={index}/{total} error={exc}")
+                raise ImageGenerationError("image generation failed") from exc
+
+            print(f"[image-generate] start pooled token={request_token[:12]}... model={model} index={index}/{total}")
+            try:
+                result = generate_image_result(request_token, prompt, model)
+                account = self.account_service.mark_image_result(request_token, success=True)
+                print(
+                    f"[image-generate] success pooled token={request_token[:12]}... "
+                    f"quota={account.get('quota') if account else 'unknown'} status={account.get('status') if account else 'unknown'}"
+                )
+                return result
+            except ImageGenerationError as exc:
+                account = self.account_service.mark_image_result(request_token, success=False)
+                message = str(exc)
+                print(
+                    f"[image-generate] fail pooled token={request_token[:12]}... "
+                    f"error={message} quota={account.get('quota') if account else 'unknown'} status={account.get('status') if account else 'unknown'}"
+                )
+                if is_token_invalid_error(message):
+                    self.account_service.remove_token(request_token)
+                    print(f"[image-generate] remove invalid token={request_token[:12]}...")
+                    continue
+                raise
+
+    def _generate_single_image_with_cpa(self, prompt: str, model: str, index: int, total: int) -> dict[str, object]:
+        attempted_tokens: set[str] = set()
+        while True:
+            request_token = cpa_service.get_token(excluded_tokens=attempted_tokens)
+            if not request_token:
+                raise ImageGenerationError("No access_token available from CPA")
+
+            attempted_tokens.add(request_token)
+            print(f"[image-generate] start cpa token={request_token[:12]}... model={model} index={index}/{total}")
+            try:
+                result = generate_image_result(request_token, prompt, model)
+                print(f"[image-generate] success cpa token={request_token[:12]}...")
+                return result
+            except ImageGenerationError as exc:
+                message = str(exc)
+                print(f"[image-generate] fail cpa token={request_token[:12]}... error={message}")
+                if is_token_invalid_error(message):
+                    cpa_service.invalidate_cache()
+                    continue
+                raise
+
     def generate_with_pool(self, prompt: str, model: str, n: int):
         created = None
         image_items: list[dict[str, object]] = []
 
         for index in range(1, n + 1):
-            while True:
-                try:
-                    request_token = self.account_service.get_available_access_token()
-                except RuntimeError as exc:
-                    print(f"[image-generate] stop index={index}/{n} error={exc}")
-                    break
+            if cpa_service.enabled:
+                result = self._generate_single_image_with_cpa(prompt, model, index, n)
+            else:
+                result = self._generate_single_image_with_local_pool(prompt, model, index, n)
 
-                print(f"[image-generate] start pooled token={request_token[:12]}... model={model} index={index}/{n}")
-                try:
-                    result = generate_image_result(request_token, prompt, model)
-                    account = self.account_service.mark_image_result(request_token, success=True)
-                    if created is None:
-                        created = result.get("created")
-                    data = result.get("data")
-                    if isinstance(data, list):
-                        image_items.extend(item for item in data if isinstance(item, dict))
-                    print(
-                        f"[image-generate] success pooled token={request_token[:12]}... "
-                        f"quota={account.get('quota') if account else 'unknown'} status={account.get('status') if account else 'unknown'}"
-                    )
-                    break
-                except ImageGenerationError as exc:
-                    account = self.account_service.mark_image_result(request_token, success=False)
-                    message = str(exc)
-                    print(
-                        f"[image-generate] fail pooled token={request_token[:12]}... "
-                        f"error={message} quota={account.get('quota') if account else 'unknown'} status={account.get('status') if account else 'unknown'}"
-                    )
-                    if is_token_invalid_error(message):
-                        self.account_service.remove_token(request_token)
-                        print(f"[image-generate] remove invalid token={request_token[:12]}...")
-                        continue
-                    break
+            if created is None:
+                created = result.get("created")
+            data = result.get("data")
+            if isinstance(data, list):
+                image_items.extend(item for item in data if isinstance(item, dict))
 
         if not image_items:
             raise ImageGenerationError("image generation failed")

@@ -30,8 +30,11 @@ request.interceptors.response.use(
         const status = error.response?.status;
         const shouldRedirect = (error.config as RequestConfig | undefined)?.redirectOnUnauthorized !== false;
         if (status === 401 && shouldRedirect && typeof window !== "undefined") {
-            await clearStoredAuthKey();
-            window.location.href = "/login";
+            if (!window.location.pathname.startsWith("/login")) {
+                await clearStoredAuthKey();
+                window.location.replace("/login");
+                return new Promise(() => {});
+            }
         }
 
         const payload = error.response?.data;

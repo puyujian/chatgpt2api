@@ -13,3 +13,4 @@ data
 config.json
 
 docker-compose-local.yml
+.ace-tool/

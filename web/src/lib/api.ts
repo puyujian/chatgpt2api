@@ -48,6 +48,20 @@ type AccountUpdateResponse = {
   items: Account[];
 };
 
+export type CPAPool = {
+  id: string;
+  name: string;
+  base_url: string;
+  secret_key: string;
+  enabled: boolean;
+};
+
+export type CPAStatus = {
+  enabled: boolean;
+  pools: number;
+  tokens: number;
+};
+
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
   return httpRequest<{ ok: boolean }>("/auth/login", {
@@ -115,4 +129,49 @@ export async function generateImage(prompt: string, model: ImageModel = "gpt-ima
       },
     },
   );
+}
+
+export async function fetchCPAPools() {
+  return httpRequest<{ pools: CPAPool[] }>("/api/cpa/pools");
+}
+
+export async function createCPAPool(pool: { name: string; base_url: string; secret_key: string; enabled?: boolean }) {
+  return httpRequest<{ pool: CPAPool; pools: CPAPool[] }>("/api/cpa/pools", {
+    method: "POST",
+    body: pool,
+  });
+}
+
+export async function updateCPAPool(
+  poolId: string,
+  updates: { name?: string; base_url?: string; secret_key?: string; enabled?: boolean },
+) {
+  return httpRequest<{ pool: CPAPool; pools: CPAPool[] }>(`/api/cpa/pools/${poolId}`, {
+    method: "POST",
+    body: updates,
+  });
+}
+
+export async function deleteCPAPool(poolId: string) {
+  return httpRequest<{ pools: CPAPool[] }>(`/api/cpa/pools/${poolId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchCPAPoolStatus(poolId: string) {
+  return httpRequest<{ pool_id: string; tokens: number }>(`/api/cpa/pools/${poolId}/status`);
+}
+
+export async function syncCPAPool(poolId: string) {
+  return httpRequest<{
+    added: number;
+    skipped: number;
+    refreshed: number;
+    errors: Array<{ access_token: string; error: string }>;
+    items: Account[];
+  }>(`/api/cpa/pools/${poolId}/sync`, { method: "POST" });
+}
+
+export async function fetchCPAGlobalStatus() {
+  return httpRequest<CPAStatus>("/api/cpa/status");
 }

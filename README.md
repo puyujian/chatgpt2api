@@ -16,7 +16,7 @@ ChatGPT 图片生成代理与账号池管理面板，提供账号维护、额度
 - 失效 Token 自动剔除
 - 提供 Web 后台管理账号和生成图片 
 
-> 当前已支持文生图和图生图。`gpt-image-2` 仍未单独适配，默认仍走现有 ChatGPT 上游模型映射。
+> 当前已支持文生图和图生图。OpenAI 兼容层已支持标准 `/v1/images/edits` multipart 图生图请求；`gpt-image-2` 仍沿用现有 ChatGPT 上游模型映射。
 
 生图界面：
 
@@ -73,7 +73,7 @@ POST /v1/responses
 {
   "prompt": "保留主体动作，改成电影海报质感",
   "model": "gpt-image-1",
-  "images": [
+ "images": [
     {
       "name": "source.png",
       "image_url": "data:image/png;base64,<base64>"
@@ -82,9 +82,21 @@ POST /v1/responses
 }
 ```
 
+标准 multipart 图生图示例：
+
+```bash
+curl http://127.0.0.1:8000/v1/images/edits \
+  -H "Authorization: Bearer <auth-key>" \
+  -F "model=gpt-image-2" \
+  -F "prompt=保留主体动作，改成电影海报质感" \
+  -F "response_format=url" \
+  -F "image=@source.png"
+```
+
 说明：
 
-- `/v1/images/edits` 当前支持 JSON 方式传入参考图，`image` 或 `images` 都可以，值支持远程 URL 或 data URL。
+- `/v1/images/edits` 兼容两种传图方式：标准 `multipart/form-data` 文件上传，以及 JSON 方式传入参考图。`image` 或 `images` 都可以；JSON 值支持远程 URL 或 data URL。
+- `/v1/images/generations` 与 `/v1/images/edits` 支持 `response_format=b64_json|url`；当前暂不支持 `mask`。
 - `/v1/chat/completions` 支持在 `messages[].content` 里带 `image_url`，即使 `model` 不是 `gpt-image-*`，只要消息里有图片附件也会按生图请求处理。
 - `/v1/responses` 支持在 `input[].content` 里带 `input_image`。
 

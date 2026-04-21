@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from json import JSONDecodeError
 from pathlib import Path
 from threading import Event, Thread
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService
 from services.config import config
 from services.cpa_service import cpa_config, cpa_service, fetch_pool_status, fetch_tokens_for_pool
+from services.utils import InputImage, build_input_image_from_bytes
 from services.version import get_app_version
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
+IMAGE_FORM_FIELD_NAMES = {"image", "images", "image[]", "images[]"}
+MASK_FORM_FIELD_NAMES = {"mask", "mask[]"}
 
 
 class ImageGenerationRequest(BaseModel):
@@ -126,6 +130,75 @@ def _sanitize_validation_value(value: object) -> object:
 
 def sanitize_validation_errors(errors: list[object]) -> list[object]:
     return [_sanitize_validation_value(error) for error in errors]
+
+
+def _is_upload_file(value: object) -> bool:
+    return isinstance(value, UploadFile) or (
+        hasattr(value, "filename")
+        and callable(getattr(value, "read", None))
+    )
+
+
+async def _upload_file_to_input_image(upload: UploadFile) -> InputImage:
+    data = await upload.read()
+    return build_input_image_from_bytes(
+        data,
+        declared_mime_type=upload.content_type,
+        name=upload.filename,
+        source="local",
+    )
+
+
+async def parse_image_generation_request(request: Request) -> dict[str, object]:
+    content_type = str(request.headers.get("content-type") or "").lower()
+
+    if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        body: dict[str, object] = {}
+        input_images: list[InputImage] = []
+        string_images: list[object] = []
+
+        for key, value in form.multi_items():
+            normalized_key = str(key or "").strip().lower()
+            if normalized_key in MASK_FORM_FIELD_NAMES:
+                raise HTTPException(status_code=400, detail={"error": "mask is not supported"})
+
+            if normalized_key in IMAGE_FORM_FIELD_NAMES:
+                if _is_upload_file(value):
+                    input_images.append(await _upload_file_to_input_image(value))
+                else:
+                    normalized = str(value or "").strip()
+                    if normalized:
+                        string_images.append(normalized)
+                continue
+
+            if _is_upload_file(value):
+                raise HTTPException(status_code=400, detail={"error": f"unsupported file field: {key}"})
+
+            body[str(key)] = str(value)
+
+        if string_images:
+            body["images"] = string_images
+        try:
+            validated = ImageGenerationRequest.model_validate(body).model_dump(mode="python")
+        except ValidationError as exc:
+            raise RequestValidationError(exc.errors()) from exc
+        if input_images:
+            validated["_input_images"] = input_images
+        return validated
+
+    try:
+        payload = await request.json()
+    except JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail={"error": "invalid json body"}) from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail={"error": "request body must be an object"})
+
+    try:
+        return ImageGenerationRequest.model_validate(payload).model_dump(mode="python")
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
@@ -264,16 +337,18 @@ def create_app() -> FastAPI:
         return {"item": account, "items": account_service.list_accounts()}
 
     @router.post("/v1/images/generations")
-    async def generate_images(body: ImageGenerationRequest, authorization: str | None = Header(default=None)):
+    async def generate_images(request: Request, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
-        return await run_in_threadpool(chatgpt_service.create_image_generation, body.model_dump(mode="python"))
+        body = await parse_image_generation_request(request)
+        return await run_in_threadpool(chatgpt_service.create_image_generation, body)
 
     @router.post("/v1/images/edits")
-    async def edit_images(body: ImageGenerationRequest, authorization: str | None = Header(default=None)):
+    async def edit_images(request: Request, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
+        body = await parse_image_generation_request(request)
         return await run_in_threadpool(
             chatgpt_service.create_image_generation,
-            body.model_dump(mode="python"),
+            body,
             require_input_images=True,
         )
 

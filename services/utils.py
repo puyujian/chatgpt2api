@@ -37,6 +37,36 @@ class InputImage:
         return len(self.data)
 
 
+def build_input_image_from_bytes(
+    image_bytes: bytes,
+    *,
+    declared_mime_type: str | None = None,
+    name: str | None = None,
+    source: str = "local",
+    fallback_url: str | None = None,
+) -> InputImage:
+    if not image_bytes:
+        raise _invalid_request("image data is empty")
+
+    detected_mime_type, extension = _detect_image_type(image_bytes)
+    mime_type = detected_mime_type
+    if declared_mime_type and declared_mime_type.startswith("image/") and declared_mime_type != detected_mime_type:
+        mime_type = detected_mime_type
+
+    if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
+        raise _invalid_request("unsupported image mime type")
+
+    width, height = _read_image_size(image_bytes, mime_type)
+    return InputImage(
+        name=_normalize_image_name(name, fallback_url, mime_type, extension),
+        mime_type=mime_type,
+        data=image_bytes,
+        width=width,
+        height=height,
+        source=source,
+    )
+
+
 def is_image_chat_request(body: dict[str, object]) -> bool:
     model = str(body.get("model") or "").strip()
     modalities = body.get("modalities")
@@ -238,26 +268,12 @@ def _build_input_image(reference: str, name: str | None) -> InputImage:
         source = "remote"
         fallback_url = reference
 
-    if not image_bytes:
-        raise _invalid_request("image data is empty")
-
-    detected_mime_type, extension = _detect_image_type(image_bytes)
-    if declared_mime_type.startswith("image/") and declared_mime_type != detected_mime_type:
-        mime_type = detected_mime_type
-    else:
-        mime_type = detected_mime_type
-
-    if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
-        raise _invalid_request("unsupported image mime type")
-
-    width, height = _read_image_size(image_bytes, mime_type)
-    return InputImage(
-        name=_normalize_image_name(name, fallback_url, mime_type, extension),
-        mime_type=mime_type,
-        data=image_bytes,
-        width=width,
-        height=height,
+    return build_input_image_from_bytes(
+        image_bytes,
+        declared_mime_type=declared_mime_type,
+        name=name,
         source=source,
+        fallback_url=fallback_url,
     )
 
 

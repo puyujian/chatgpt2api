@@ -21,6 +21,62 @@ class ChatGPTService:
     def __init__(self, account_service: AccountService):
         self.account_service = account_service
 
+    def _extract_preparsed_input_images(
+        self,
+        body: dict[str, object],
+        *,
+        require_input_images: bool = False,
+    ) -> list[InputImage]:
+        raw_images = body.get("_input_images")
+        if isinstance(raw_images, list) and all(isinstance(item, InputImage) for item in raw_images):
+            if require_input_images and not raw_images:
+                raise HTTPException(status_code=400, detail={"error": "image is required"})
+            return list(raw_images)
+        return extract_generation_images(body, require_image=require_input_images)
+
+    def _normalize_generation_response_format(self, raw_value: object) -> str:
+        response_format = str(raw_value or "b64_json").strip().lower() or "b64_json"
+        if response_format not in {"b64_json", "url"}:
+            raise HTTPException(status_code=400, detail={"error": "response_format must be b64_json or url"})
+        return response_format
+
+    def _format_image_generation_result(
+        self,
+        image_result: dict[str, object],
+        *,
+        response_format: str,
+    ) -> dict[str, object]:
+        image_items = image_result.get("data")
+        if not isinstance(image_items, list):
+            return image_result
+
+        formatted_items: list[dict[str, object]] = []
+        for item in image_items:
+            if not isinstance(item, dict):
+                continue
+            formatted_item: dict[str, object] = {}
+            revised_prompt = str(item.get("revised_prompt") or "").strip()
+            if revised_prompt:
+                formatted_item["revised_prompt"] = revised_prompt
+
+            if response_format == "url":
+                url = str(item.get("url") or "").strip()
+                if not url:
+                    raise HTTPException(status_code=502, detail={"error": "image url is unavailable"})
+                formatted_item["url"] = url
+            else:
+                b64_json = str(item.get("b64_json") or "").strip()
+                if not b64_json:
+                    raise HTTPException(status_code=502, detail={"error": "image base64 is unavailable"})
+                formatted_item["b64_json"] = b64_json
+
+            formatted_items.append(formatted_item)
+
+        return {
+            "created": image_result.get("created"),
+            "data": formatted_items,
+        }
+
     def _generate_single_image_with_local_pool(
         self,
         prompt: str,
@@ -123,12 +179,14 @@ class ChatGPTService:
 
         model = str(body.get("model") or "gpt-image-1").strip() or "gpt-image-1"
         n = parse_image_count(body.get("n"))
-        input_images = extract_generation_images(body, require_image=require_input_images)
+        response_format = self._normalize_generation_response_format(body.get("response_format"))
+        input_images = self._extract_preparsed_input_images(body, require_input_images=require_input_images)
 
         try:
-            return self.generate_with_pool(prompt, model, n, input_images)
+            image_result = self.generate_with_pool(prompt, model, n, input_images)
         except ImageGenerationError as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+        return self._format_image_generation_result(image_result, response_format=response_format)
 
     def create_image_completion(self, body: dict[str, object]) -> dict[str, object]:
         if not is_image_chat_request(body):

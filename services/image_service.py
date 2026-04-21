@@ -636,7 +636,13 @@ def generate_image_result(
         print(f"[image-upstream] success token={access_token[:12]}... images=1")
         return {
             "created": time.time_ns() // 1_000_000_000,
-            "data": [{"b64_json": result.b64_json, "revised_prompt": result.revised_prompt}],
+            "data": [
+                {
+                    "b64_json": result.b64_json,
+                    "revised_prompt": result.revised_prompt,
+                    "url": result.url,
+                }
+            ],
         }
     except Exception as exc:
         print(f"[image-upstream] fail token={access_token[:12]}... error={exc}")

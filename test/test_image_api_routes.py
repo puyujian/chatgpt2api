@@ -58,6 +58,83 @@ def test_images_edits_route_passes_reference_images(monkeypatch) -> None:
     assert len(captured["input_images"]) == 1
 
 
+def test_images_edits_route_accepts_multipart_file(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    png_bytes = (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00"
+        b"\x1f\x15\xc4\x89"
+        b"\x00\x00\x00\x0bIDATx\x9cc\xf8\xff\x1f\x00\x03\x03\x02\x00\xee\xfe[\xd4"
+        b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+
+    def fake_generate_with_pool(self, prompt, model, n, input_images=None):
+        captured["prompt"] = prompt
+        captured["model"] = model
+        captured["n"] = n
+        captured["input_images"] = input_images or []
+        return {"created": 5, "data": [{"b64_json": "ZmFrZQ==", "revised_prompt": prompt, "url": "https://example.com/image.png"}]}
+
+    monkeypatch.setattr(api_module, "start_limited_account_watcher", lambda stop_event: _DummyThread())
+    monkeypatch.setattr(ChatGPTService, "generate_with_pool", fake_generate_with_pool)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/images/edits",
+            headers=_auth_headers(),
+            data={
+                "prompt": "保留主体，改成电影海报",
+                "model": "gpt-image-2",
+                "response_format": "url",
+            },
+            files=[("image", ("source.png", png_bytes, "image/png"))],
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert captured["prompt"] == "保留主体，改成电影海报"
+    assert captured["model"] == "gpt-image-2"
+    assert captured["n"] == 1
+    assert len(captured["input_images"]) == 1
+    assert payload["data"][0]["url"] == "https://example.com/image.png"
+    assert "b64_json" not in payload["data"][0]
+
+
+def test_images_generation_route_honors_url_response_format(monkeypatch) -> None:
+    def fake_generate_with_pool(self, prompt, model, n, input_images=None):
+        return {
+            "created": 6,
+            "data": [
+                {
+                    "b64_json": "ZmFrZQ==",
+                    "revised_prompt": prompt,
+                    "url": "https://example.com/generated.png",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(api_module, "start_limited_account_watcher", lambda stop_event: _DummyThread())
+    monkeypatch.setattr(ChatGPTService, "generate_with_pool", fake_generate_with_pool)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/images/generations",
+            headers=_auth_headers(),
+            json={
+                "prompt": "生成一张电影海报",
+                "model": "gpt-image-2",
+                "response_format": "url",
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"][0]["url"] == "https://example.com/generated.png"
+    assert "b64_json" not in payload["data"][0]
+
+
 def test_chat_completions_accepts_image_inputs(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

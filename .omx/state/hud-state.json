@@ -1,6 +1,6 @@
 {
-  "last_turn_at": "2026-04-21T11:20:02.702Z",
-  "turn_count": 11,
-  "last_progress_at": "2026-04-21T11:20:02.702Z",
-  "last_agent_output": "图片编辑链路的 `HTTP/2 stream ... INTERNAL_ERROR` 现在不会再以未处理异常炸成 500 了。\n\n**结果**\n- [services/image_service.py"
+  "last_turn_at": "2026-04-21T11:33:51.189Z",
+  "turn_count": 12,
+  "last_progress_at": "2026-04-21T11:33:51.189Z",
+  "last_agent_output": "基本认可，但我不会把它定性成“非代码 bug”。\n\n更准确的说法是：上游生图主链路大概率是通的，失败集中在下载签名 URL 这一步；但原实现把这种可恢复的下游抖动直接放大成了 502，所以这是“下游/"
 }

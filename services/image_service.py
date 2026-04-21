@@ -564,10 +564,25 @@ def _fetch_download_url(session: Session, access_token: str, device_id: str, con
 
 
 def _download_as_base64(session: Session, download_url: str) -> str:
-    response = session.get(download_url, timeout=60)
-    if not response.ok or not response.content:
-        raise ImageGenerationError("download image failed")
-    return base64.b64encode(response.content).decode("ascii")
+    max_attempts = 3
+    last_detail = "unknown"
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = session.get(download_url, timeout=(10, 120))
+            status = getattr(response, "status_code", 0)
+            content = response.content or b""
+            if response.ok and content:
+                return base64.b64encode(content).decode("ascii")
+            last_detail = f"status={status} bytes={len(content)}"
+        except RequestException as exc:
+            last_detail = f"exception={type(exc).__name__}: {exc}"
+        print(
+            f"[image-download] retry attempt={attempt}/{max_attempts} "
+            f"detail={last_detail}"
+        )
+        if attempt < max_attempts:
+            time.sleep((2 ** (attempt - 1)) * 0.5 + random.uniform(0, 0.25))
+    raise ImageGenerationError(f"download image failed ({last_detail})")
 
 
 def _resolve_upstream_model(access_token: str, requested_model: str) -> str:

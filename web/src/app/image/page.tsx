@@ -217,46 +217,53 @@ export default function ImagePage() {
     });
   }, [selectedConversation, isGenerating]);
 
+  const stepPreview = useCallback((delta: number) => {
+    setPreview((prev) =>
+      prev && prev.images.length > 1
+        ? {
+            ...prev,
+            index: (prev.index + delta + prev.images.length) % prev.images.length,
+            zoomed: false,
+          }
+        : prev,
+    );
+  }, []);
+
+  const toggleZoom = useCallback(() => {
+    setPreview((prev) => (prev ? { ...prev, zoomed: !prev.zoomed } : null));
+  }, []);
+
+  const closePreview = useCallback(() => setPreview(null), []);
+
+  const isPreviewOpen = preview !== null;
+
   useEffect(() => {
-    if (!preview) {
+    if (!isPreviewOpen) {
       return;
     }
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === "ArrowLeft") {
         event.preventDefault();
-        setPreview((prev) =>
-          prev && prev.images.length > 1
-            ? {
-                ...prev,
-                index: (prev.index - 1 + prev.images.length) % prev.images.length,
-                zoomed: false,
-              }
-            : prev,
-        );
+        stepPreview(-1);
       } else if (event.key === "ArrowRight") {
         event.preventDefault();
-        setPreview((prev) =>
-          prev && prev.images.length > 1
-            ? {
-                ...prev,
-                index: (prev.index + 1) % prev.images.length,
-                zoomed: false,
-              }
-            : prev,
-        );
+        stepPreview(1);
       }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [preview]);
+  }, [isPreviewOpen, stepPreview]);
 
   const handleDownloadPreview = () => {
     if (!preview) return;
     const current = preview.images[preview.index];
     if (!current) return;
+    const mimeMatch = current.src.match(/^data:(image\/[^;]+);/);
+    const mime = mimeMatch?.[1] ?? "image/png";
+    const ext = (mime.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "") || "png";
     const link = document.createElement("a");
     link.href = current.src;
-    link.download = `image-${preview.index + 1}-${Date.now()}.png`;
+    link.download = `image-${preview.index + 1}-${Date.now()}.${ext}`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -629,22 +636,22 @@ export default function ImagePage() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const successList: PreviewImage[] = [];
-                                  let targetIdx = 0;
-                                  selectedConversation.images.forEach((img, i) => {
-                                    if (img.status === "success" && img.b64_json) {
-                                      if (img.id === image.id) {
-                                        targetIdx = successList.length;
-                                      }
-                                      successList.push({
-                                        src: `data:image/png;base64,${img.b64_json}`,
-                                        alt: `Generated result ${i + 1}`,
-                                      });
-                                    }
-                                  });
+                                  type Entry = PreviewImage & { id: string };
+                                  const successList: Entry[] = selectedConversation.images
+                                    .map<Entry | null>((img, i) =>
+                                      img.status === "success" && img.b64_json
+                                        ? {
+                                            id: img.id,
+                                            src: `data:image/png;base64,${img.b64_json}`,
+                                            alt: `Generated result ${i + 1}`,
+                                          }
+                                        : null,
+                                    )
+                                    .filter((item): item is Entry => item !== null);
+                                  const targetIdx = successList.findIndex((item) => item.id === image.id);
                                   setPreview({
-                                    images: successList,
-                                    index: targetIdx,
+                                    images: successList.map(({ src, alt }) => ({ src, alt })),
+                                    index: Math.max(0, targetIdx),
                                     zoomed: false,
                                   });
                                 }}
@@ -848,15 +855,15 @@ export default function ImagePage() {
                   <button
                     type="button"
                     onClick={handleDownloadPreview}
-                    className="inline-flex size-9 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition hover:bg-white/20"
+                    className="inline-flex size-9 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                     aria-label="下载图片"
                   >
                     <Download className="size-4" />
                   </button>
                   <button
                     type="button"
-                    onClick={() => setPreview(null)}
-                    className="inline-flex size-9 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition hover:bg-white/20"
+                    onClick={closePreview}
+                    className="inline-flex size-9 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                     aria-label="关闭预览"
                   >
                     <X className="size-4" />
@@ -869,26 +876,41 @@ export default function ImagePage() {
                   "flex h-full w-full items-center justify-center",
                   preview.zoomed ? "overflow-auto" : "overflow-hidden",
                 )}
-                onClick={() => setPreview(null)}
-                role="presentation"
+                onClick={(event) => {
+                  if (event.target === event.currentTarget) {
+                    closePreview();
+                  }
+                }}
               >
-                <Image
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
                   src={preview.images[preview.index].src}
                   alt={preview.images[preview.index].alt}
-                  width={2048}
-                  height={2048}
-                  unoptimized
+                  role="button"
+                  tabIndex={0}
+                  aria-label={
+                    preview.zoomed
+                      ? "当前为原始尺寸，按 Enter 恢复适配"
+                      : "当前适配视口，按 Enter 放大至原始尺寸"
+                  }
                   onClick={(event) => {
                     event.stopPropagation();
-                    setPreview((prev) => (prev ? { ...prev, zoomed: !prev.zoomed } : null));
+                    toggleZoom();
                   }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      toggleZoom();
+                    }
+                  }}
+                  draggable={false}
                   className={cn(
-                    "block h-auto select-none transition-transform duration-200",
+                    "block h-auto select-none transition-transform duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black",
                     preview.zoomed
                       ? "max-h-none max-w-none cursor-zoom-out"
                       : "max-h-[88vh] w-auto max-w-[96vw] cursor-zoom-in object-contain",
                   )}
-                  draggable={false}
                 />
               </div>
 
@@ -896,37 +918,16 @@ export default function ImagePage() {
                 <>
                   <button
                     type="button"
-                    onClick={() =>
-                      setPreview((prev) =>
-                        prev
-                          ? {
-                              ...prev,
-                              index:
-                                (prev.index - 1 + prev.images.length) % prev.images.length,
-                              zoomed: false,
-                            }
-                          : null,
-                      )
-                    }
-                    className="absolute left-4 top-1/2 z-20 inline-flex size-11 -translate-y-1/2 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition hover:bg-white/20"
+                    onClick={() => stepPreview(-1)}
+                    className="absolute left-4 top-1/2 z-20 inline-flex size-11 -translate-y-1/2 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                     aria-label="上一张"
                   >
                     <ChevronLeft className="size-5" />
                   </button>
                   <button
                     type="button"
-                    onClick={() =>
-                      setPreview((prev) =>
-                        prev
-                          ? {
-                              ...prev,
-                              index: (prev.index + 1) % prev.images.length,
-                              zoomed: false,
-                            }
-                          : null,
-                      )
-                    }
-                    className="absolute right-4 top-1/2 z-20 inline-flex size-11 -translate-y-1/2 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition hover:bg-white/20"
+                    onClick={() => stepPreview(1)}
+                    className="absolute right-4 top-1/2 z-20 inline-flex size-11 -translate-y-1/2 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                     aria-label="下一张"
                   >
                     <ChevronRight className="size-5" />

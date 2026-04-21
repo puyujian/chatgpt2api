@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import time
+
 from fastapi import HTTPException
 
 from services.account_service import AccountService
 from services.cpa_service import cpa_service
 from services.image_service import ImageGenerationError, generate_image_result, is_token_invalid_error
+from services.usage_log_service import usage_log_service
 from services.utils import (
     build_chat_image_completion,
     extract_chat_prompt_and_images,
@@ -77,6 +80,40 @@ class ChatGPTService:
             "data": formatted_items,
         }
 
+    def _log_usage(
+        self,
+        *,
+        access_token: str,
+        source: str,
+        model: str,
+        prompt: str,
+        success: bool,
+        started_at: float,
+        error: str | None,
+        input_images: list[InputImage] | None,
+        upstream_model: str | None = None,
+    ) -> None:
+        account = self.account_service.get_account(access_token) or {}
+        try:
+            usage_log_service.append(
+                access_token=access_token,
+                source=source,
+                model=model,
+                prompt=prompt,
+                success=success,
+                duration_ms=int((time.perf_counter() - started_at) * 1000),
+                error=error,
+                account_email=account.get("email"),
+                account_type=account.get("type"),
+                upstream_model=upstream_model,
+                has_reference_image=bool(input_images),
+            )
+        except Exception as exc:
+            print(
+                f"[usage-log] append failed token={access_token[:12]}... "
+                f"source={source} success={success} error={exc}"
+            )
+
     def _generate_single_image_with_local_pool(
         self,
         prompt: str,
@@ -93,20 +130,45 @@ class ChatGPTService:
                 raise ImageGenerationError("image generation failed") from exc
 
             print(f"[image-generate] start pooled token={request_token[:12]}... model={model} index={index}/{total}")
+            started_at = time.perf_counter()
             try:
                 result = generate_image_result(request_token, prompt, model, input_images=input_images)
+                upstream_model = str(result.get("upstream_model") or "").strip() or None
                 account = self.account_service.mark_image_result(request_token, success=True)
                 print(
                     f"[image-generate] success pooled token={request_token[:12]}... "
                     f"quota={account.get('quota') if account else 'unknown'} status={account.get('status') if account else 'unknown'}"
                 )
+                self._log_usage(
+                    access_token=request_token,
+                    source="pool",
+                    model=model,
+                    prompt=prompt,
+                    success=True,
+                    started_at=started_at,
+                    error=None,
+                    input_images=input_images,
+                    upstream_model=upstream_model,
+                )
                 return result
             except ImageGenerationError as exc:
                 account = self.account_service.mark_image_result(request_token, success=False)
                 message = str(exc)
+                upstream_model = str(getattr(exc, "upstream_model", "") or "").strip() or None
                 print(
                     f"[image-generate] fail pooled token={request_token[:12]}... "
                     f"error={message} quota={account.get('quota') if account else 'unknown'} status={account.get('status') if account else 'unknown'}"
+                )
+                self._log_usage(
+                    access_token=request_token,
+                    source="pool",
+                    model=model,
+                    prompt=prompt,
+                    success=False,
+                    started_at=started_at,
+                    error=message,
+                    input_images=input_images,
+                    upstream_model=upstream_model,
                 )
                 if is_token_invalid_error(message):
                     self.account_service.remove_token(request_token)
@@ -130,13 +192,41 @@ class ChatGPTService:
 
             attempted_tokens.add(request_token)
             print(f"[image-generate] start cpa token={request_token[:12]}... model={model} index={index}/{total}")
+            started_at = time.perf_counter()
             try:
                 result = generate_image_result(request_token, prompt, model, input_images=input_images)
+                upstream_model = str(result.get("upstream_model") or "").strip() or None
+                # Also update local account metrics if this token is tracked locally
+                self.account_service.mark_image_result(request_token, success=True)
                 print(f"[image-generate] success cpa token={request_token[:12]}...")
+                self._log_usage(
+                    access_token=request_token,
+                    source="cpa",
+                    model=model,
+                    prompt=prompt,
+                    success=True,
+                    started_at=started_at,
+                    error=None,
+                    input_images=input_images,
+                    upstream_model=upstream_model,
+                )
                 return result
             except ImageGenerationError as exc:
+                self.account_service.mark_image_result(request_token, success=False)
                 message = str(exc)
+                upstream_model = str(getattr(exc, "upstream_model", "") or "").strip() or None
                 print(f"[image-generate] fail cpa token={request_token[:12]}... error={message}")
+                self._log_usage(
+                    access_token=request_token,
+                    source="cpa",
+                    model=model,
+                    prompt=prompt,
+                    success=False,
+                    started_at=started_at,
+                    error=message,
+                    input_images=input_images,
+                    upstream_model=upstream_model,
+                )
                 if is_token_invalid_error(message):
                     cpa_service.invalidate_cache()
                     continue

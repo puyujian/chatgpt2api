@@ -28,6 +28,7 @@ def test_generate_image_result_recovers_from_interrupted_sse(monkeypatch) -> Non
     session = _FakeSession()
 
     monkeypatch.setattr(image_service, "_new_session", lambda access_token: (session, {}))
+    monkeypatch.setattr(image_service, "_resolve_upstream_model", lambda access_token, model: "gpt-5-3")
     monkeypatch.setattr(image_service, "_bootstrap", lambda session_obj, fp: "device-123")
     monkeypatch.setattr(image_service, "_chat_requirements", lambda session_obj, access_token, device_id: ("chat-token", {}))
     monkeypatch.setattr(image_service, "_send_conversation", lambda *args, **kwargs: _InterruptedSSEOpenResponse())
@@ -43,6 +44,7 @@ def test_generate_image_result_recovers_from_interrupted_sse(monkeypatch) -> Non
 
     assert result["data"][0]["b64_json"] == "ZmFrZQ=="
     assert result["data"][0]["url"] == "https://example.com/generated.png"
+    assert result["upstream_model"] == "gpt-5-3"
     assert session.closed is True
 
 

@@ -186,3 +186,52 @@ export async function syncCPAPool(poolId: string) {
 export async function fetchCPAGlobalStatus() {
   return httpRequest<CPAStatus>("/api/cpa/status");
 }
+
+export type UsageLog = {
+  id: string;
+  timestamp: string;
+  token_mask: string;
+  source: string;
+  model: string;
+  upstream_model?: string | null;
+  prompt: string;
+  success: boolean;
+  duration_ms: number;
+  error?: string | null;
+  account_email?: string | null;
+  account_type?: string | null;
+  has_reference_image: boolean;
+};
+
+export type UsageLogListResponse = {
+  items: UsageLog[];
+  total: number;
+  limit: number;
+  offset: number;
+  summary: { total: number; success: number; fail: number };
+};
+
+export type UsageLogQuery = {
+  limit?: number;
+  offset?: number;
+  status?: "all" | "success" | "fail";
+  source?: "all" | "pool" | "cpa";
+  query?: string;
+};
+
+export async function fetchUsageLogs(params: UsageLogQuery = {}) {
+  const search = new URLSearchParams();
+  if (params.limit != null) search.set("limit", String(params.limit));
+  if (params.offset != null) search.set("offset", String(params.offset));
+  if (params.status && params.status !== "all") search.set("status", params.status);
+  if (params.source && params.source !== "all") search.set("source", params.source);
+  if (params.query) search.set("query", params.query);
+  const qs = search.toString();
+  return httpRequest<UsageLogListResponse>(`/api/usage-logs${qs ? `?${qs}` : ""}`);
+}
+
+export async function clearUsageLogs() {
+  return httpRequest<{ removed: number }>("/api/usage-logs", {
+    method: "DELETE",
+  });
+}

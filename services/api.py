@@ -16,6 +16,7 @@ from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService
 from services.config import config
 from services.cpa_service import cpa_config, cpa_service, fetch_pool_status, fetch_tokens_for_pool
+from services.usage_log_service import usage_log_service
 from services.utils import InputImage, build_input_image_from_bytes
 from services.version import get_app_version
 
@@ -437,6 +438,30 @@ def create_app() -> FastAPI:
             return {"enabled": False, "pools": 0, "tokens": 0}
         tokens = await run_in_threadpool(cpa_service.fetch_all_tokens)
         return {"enabled": True, "pools": len(cpa_config.usable_pools()), "tokens": len(tokens)}
+
+    @router.get("/api/usage-logs")
+    async def list_usage_logs(
+        authorization: str | None = Header(default=None),
+        limit: int = 100,
+        offset: int = 0,
+        status: str | None = None,
+        source: str | None = None,
+        query: str | None = None,
+    ):
+        require_auth_key(authorization)
+        return usage_log_service.list_logs(
+            limit=limit,
+            offset=offset,
+            status=status,
+            source=source,
+            query=query,
+        )
+
+    @router.delete("/api/usage-logs")
+    async def clear_usage_logs(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        removed = usage_log_service.clear()
+        return {"removed": removed}
 
     app.include_router(router)
 

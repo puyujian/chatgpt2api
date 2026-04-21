@@ -56,7 +56,9 @@ _WIN_KEYS = [
 
 
 class ImageGenerationError(Exception):
-    pass
+    def __init__(self, message: str, *, upstream_model: str | None = None) -> None:
+        super().__init__(message)
+        self.upstream_model = upstream_model
 
 
 @dataclass
@@ -665,6 +667,7 @@ def generate_image_result(
         print(f"[image-upstream] success token={access_token[:12]}... images=1")
         return {
             "created": time.time_ns() // 1_000_000_000,
+            "upstream_model": upstream_model,
             "data": [
                 {
                     "b64_json": result.b64_json,
@@ -674,12 +677,14 @@ def generate_image_result(
             ],
         }
     except ImageGenerationError as exc:
+        if getattr(exc, "upstream_model", None) is None:
+            exc.upstream_model = upstream_model
         print(f"[image-upstream] fail token={access_token[:12]}... error={exc}")
         raise
     except RequestException as exc:
         message = f"upstream request failed: {exc}"
         print(f"[image-upstream] fail token={access_token[:12]}... error={message}")
-        raise ImageGenerationError(message) from exc
+        raise ImageGenerationError(message, upstream_model=upstream_model) from exc
     except Exception as exc:
         print(f"[image-upstream] fail token={access_token[:12]}... error={exc}")
         raise

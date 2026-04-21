@@ -6,6 +6,7 @@ import { ArrowUp, ImagePlus, LoaderCircle, MessageSquarePlus, Trash2, X } from "
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -104,6 +105,11 @@ function readFileAsDataUrl(file: File) {
   });
 }
 
+type PreviewImage = {
+  alt: string;
+  src: string;
+};
+
 export default function ImagePage() {
   const didLoadQuotaRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -116,6 +122,7 @@ export default function ImagePage() {
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [availableQuota, setAvailableQuota] = useState("加载中");
+  const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
   const resultsViewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -557,14 +564,29 @@ export default function ImagePage() {
                         {selectedConversation.images.map((image, index) => (
                           <div key={image.id} className="break-inside-avoid overflow-hidden rounded-[22px]">
                             {image.status === "success" && image.b64_json ? (
-                              <Image
-                                src={`data:image/png;base64,${image.b64_json}`}
-                                alt={`Generated result ${index + 1}`}
-                                width={1024}
-                                height={1024}
-                                unoptimized
-                                className="block h-auto w-full"
-                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setPreviewImage({
+                                    alt: `Generated result ${index + 1}`,
+                                    src: `data:image/png;base64,${image.b64_json}`,
+                                  })
+                                }
+                                className="group relative block w-full cursor-zoom-in overflow-hidden rounded-[22px] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-400 focus-visible:ring-offset-2"
+                                aria-label={`放大查看第 ${index + 1} 张生成图片`}
+                              >
+                                <Image
+                                  src={`data:image/png;base64,${image.b64_json}`}
+                                  alt={`Generated result ${index + 1}`}
+                                  width={1024}
+                                  height={1024}
+                                  unoptimized
+                                  className="block h-auto w-full transition duration-200 group-hover:scale-[1.01]"
+                                />
+                                <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent px-4 py-3 text-xs font-medium tracking-[0.08em] text-white/92 opacity-0 transition group-hover:opacity-100">
+                                  点击放大
+                                </span>
+                              </button>
                             ) : image.status === "error" ? (
                               <div className="flex min-h-[320px] items-center justify-center bg-rose-50 px-6 py-8 text-center text-sm leading-6 text-rose-600">
                                 {image.error || "生成失败"}
@@ -728,6 +750,32 @@ export default function ImagePage() {
           </div>
         </div>
       </section>
+
+      <Dialog open={Boolean(previewImage)} onOpenChange={(open) => (!open ? setPreviewImage(null) : null)}>
+        <DialogContent
+          className="w-[min(96vw,1200px)] border-stone-800 bg-stone-950 p-3 text-white sm:p-4"
+          showCloseButton={false}
+        >
+          <DialogTitle className="sr-only">{previewImage?.alt ?? "生成图片预览"}</DialogTitle>
+          {previewImage ? (
+            <button
+              type="button"
+              onClick={() => setPreviewImage(null)}
+              className="block w-full cursor-zoom-out overflow-hidden rounded-[24px] bg-black"
+              aria-label="关闭图片预览"
+            >
+              <Image
+                src={previewImage.src}
+                alt={previewImage.alt}
+                width={1536}
+                height={1536}
+                unoptimized
+                className="h-auto max-h-[85vh] w-full object-contain"
+              />
+            </button>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

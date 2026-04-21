@@ -172,6 +172,50 @@ def test_chat_completions_accepts_image_inputs(monkeypatch) -> None:
     assert response.json()["choices"][0]["message"]["images"][0]["b64_json"] == "ZmFrZQ=="
 
 
+def test_chat_completions_ignores_stream_flag_for_image_requests(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_generate_with_pool(self, prompt, model, n, input_images=None):
+        captured["prompt"] = prompt
+        captured["model"] = model
+        captured["input_images"] = input_images or []
+        return {
+            "created": 7,
+            "data": [{"b64_json": "ZmFrZQ==", "revised_prompt": prompt, "url": "https://example.com/stream.png"}],
+        }
+
+    monkeypatch.setattr(api_module, "start_limited_account_watcher", lambda stop_event: _DummyThread())
+    monkeypatch.setattr(ChatGPTService, "generate_with_pool", fake_generate_with_pool)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers=_auth_headers(),
+            json={
+                "model": "gpt-image-2",
+                "stream": True,
+                "size": "3:4",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "保留主体，改成电影海报"},
+                            {"type": "image_url", "image_url": {"url": PNG_DATA_URL}},
+                        ],
+                    }
+                ],
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert captured["prompt"] == "保留主体，改成电影海报"
+    assert captured["model"] == "gpt-image-2"
+    assert len(captured["input_images"]) == 1
+    assert payload["model"] == "gpt-image-2"
+    assert payload["choices"][0]["message"]["images"][0]["b64_json"] == "ZmFrZQ=="
+
+
 def test_chat_completions_accepts_non_image_model_when_message_has_image_inputs(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

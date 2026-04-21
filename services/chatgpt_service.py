@@ -195,8 +195,10 @@ class ChatGPTService:
                 detail={"error": "only image generation requests are supported on this endpoint"},
             )
 
-        if bool(body.get("stream")):
-            raise HTTPException(status_code=400, detail={"error": "stream is not supported for image generation"})
+        # 为兼容现有 chat/completions 生图工作流，允许传 stream=true，
+        # 但当前仍返回标准 JSON 响应，不做 SSE 分块。
+        if "stream" in body:
+            body["stream"] = False
 
         requested_model = str(body.get("model") or "gpt-image-1").strip() or "gpt-image-1"
         generation_model = requested_model if requested_model in {"gpt-image-1", "gpt-image-2"} else "gpt-image-1"

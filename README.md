@@ -98,6 +98,7 @@ curl http://127.0.0.1:8000/v1/images/edits \
 - `/v1/images/edits` 兼容两种传图方式：标准 `multipart/form-data` 文件上传，以及 JSON 方式传入参考图。`image` 或 `images` 都可以；JSON 值支持远程 URL 或 data URL。
 - `/v1/images/generations` 与 `/v1/images/edits` 支持 `response_format=b64_json|url`；当前暂不支持 `mask`。
 - `/v1/chat/completions` 支持在 `messages[].content` 里带 `image_url`，即使 `model` 不是 `gpt-image-*`，只要消息里有图片附件也会按生图请求处理。
+- `/v1/chat/completions` 兼容旧工作流里 `stream=true` 的图片请求，但当前仍返回单次 JSON，不返回 SSE 分块。
 - `/v1/responses` 支持在 `input[].content` 里带 `input_image`。
 
 ## 部署

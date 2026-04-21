@@ -6,8 +6,9 @@ from threading import Event, Thread
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.account_service import account_service
@@ -107,6 +108,26 @@ def require_auth_key(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail={"error": "authorization is invalid"})
 
 
+def _sanitize_validation_value(value: object) -> object:
+    if isinstance(value, bytes):
+        preview = value[:32].hex()
+        suffix = "..." if len(value) > 32 else ""
+        return f"<bytes len={len(value)} hex={preview}{suffix}>"
+    if isinstance(value, bytearray):
+        return _sanitize_validation_value(bytes(value))
+    if isinstance(value, dict):
+        return {str(key): _sanitize_validation_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_validation_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_validation_value(item) for item in value]
+    return value
+
+
+def sanitize_validation_errors(errors: list[object]) -> list[object]:
+    return [_sanitize_validation_value(error) for error in errors]
+
+
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     interval_seconds = config.refresh_account_interval_minute * 60
 
@@ -170,6 +191,14 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_request_validation_error(_, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": sanitize_validation_errors(exc.errors())},
+        )
+
     router = APIRouter()
 
     @router.get("/v1/models")

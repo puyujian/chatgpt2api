@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 import services.api as api_module
-from services.api import create_app
+from services.api import create_app, sanitize_validation_errors
 from services.chatgpt_service import ChatGPTService
 from services.config import config
 
@@ -165,3 +169,56 @@ def test_responses_accepts_input_image(monkeypatch) -> None:
     assert captured["prompt"] == "让它更像海报"
     assert captured["model"] == "gpt-image-1"
     assert len(captured["input_images"]) == 1
+
+
+def test_sanitize_validation_errors_replaces_bytes() -> None:
+    errors = sanitize_validation_errors(
+        [
+            {
+                "type": "missing",
+                "loc": ["body", "image"],
+                "msg": "Field required",
+                "input": b"\xff\xd8\xffbinary",
+            }
+        ]
+    )
+
+    assert errors[0]["input"] == "<bytes len=9 hex=ffd8ff62696e617279>"
+
+
+def test_request_validation_error_handler_handles_binary_input(monkeypatch) -> None:
+    monkeypatch.setattr(api_module, "start_limited_account_watcher", lambda stop_event: _DummyThread())
+    app = create_app()
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/v1/images/edits",
+        "headers": [],
+        "query_string": b"",
+        "scheme": "http",
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+    }
+    request = Request(scope)
+    exc = RequestValidationError(
+        [
+            {
+                "type": "missing",
+                "loc": ("body", "image"),
+                "msg": "Field required",
+                "input": b"\xff\xd8\xffbinary",
+            }
+        ]
+    )
+
+    response = None
+    for exception_class, handler in app.exception_handlers.items():
+        if exception_class is RequestValidationError:
+            response = asyncio.run(handler(request, exc))
+            break
+
+    assert response is not None
+    assert response.status_code == 422
+    assert b"<bytes len=9 hex=ffd8ff62696e617279>" in response.body

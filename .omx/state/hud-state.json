@@ -1,6 +1,6 @@
 {
-  "last_turn_at": "2026-04-21T10:02:59.453Z",
-  "turn_count": 8,
-  "last_progress_at": "2026-04-21T10:02:59.453Z",
-  "last_agent_output": "根因已经修掉了。图生图报的这个 400 不是外层 `/v1/images/edits` 参数校验，而是后端把参考图上传到 ChatGPT 上游时，第二步 `process_upload_stream`"
+  "last_turn_at": "2026-04-21T10:09:13.403Z",
+  "turn_count": 9,
+  "last_progress_at": "2026-04-21T10:09:13.403Z",
+  "last_agent_output": "这个日志报错已经修掉了，根因不是图生图主流程失败，而是 FastAPI 在处理某个请求校验错误时，把错误详情里的原始二进制 `bytes` 当 UTF-8 去编码，结果异常处理器自己崩了。主修复在 ["
 }

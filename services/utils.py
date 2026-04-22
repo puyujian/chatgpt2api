@@ -457,16 +457,24 @@ def build_chat_image_completion(
         if not isinstance(item, dict):
             continue
         b64_json = str(item.get("b64_json") or "").strip()
-        if not b64_json:
+        url = str(item.get("url") or "").strip()
+        if not b64_json and not url:
             continue
-        image_data_url = f"data:image/png;base64,{b64_json}"
-        markdown_images.append(f"![image_{index}]({image_data_url})")
-        output_images.append(
-            {
-                "b64_json": b64_json,
-                "revised_prompt": str(item.get("revised_prompt") or prompt).strip(),
-            }
-        )
+
+        content_url = url
+        if not content_url and b64_json:
+            content_url = f"data:image/png;base64,{b64_json}"
+        if content_url:
+            markdown_images.append(f"![image_{index}]({content_url})")
+
+        output_item: dict[str, object] = {
+            "revised_prompt": str(item.get("revised_prompt") or prompt).strip(),
+        }
+        if b64_json:
+            output_item["b64_json"] = b64_json
+        if url:
+            output_item["url"] = url
+        output_images.append(output_item)
 
     text_content = "\n\n".join(markdown_images) if markdown_images else "Image generation completed."
 

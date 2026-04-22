@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from json import JSONDecodeError
 from pathlib import Path
@@ -9,7 +10,7 @@ from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, UploadFi
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from services.account_service import account_service
@@ -131,6 +132,104 @@ def _sanitize_validation_value(value: object) -> object:
 
 def sanitize_validation_errors(errors: list[object]) -> list[object]:
     return [_sanitize_validation_value(error) for error in errors]
+
+
+def _encode_sse(data: str) -> bytes:
+    return f"data: {data}\n\n".encode("utf-8")
+
+
+def _iter_text_chunks(text: str, *, chunk_size: int = 4096):
+    normalized = str(text or "")
+    if not normalized:
+        return
+    for start in range(0, len(normalized), chunk_size):
+        yield normalized[start : start + chunk_size]
+
+
+def _build_chat_completion_stream_response(payload: dict[str, object]) -> StreamingResponse:
+    completion_id = str(payload.get("id") or "")
+    created = int(payload.get("created") or 0)
+    model = str(payload.get("model") or "")
+
+    message: dict[str, object] = {}
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        candidate_message = choices[0].get("message")
+        if isinstance(candidate_message, dict):
+            message = candidate_message
+
+    content = str(message.get("content") or "")
+    image_items = message.get("images")
+    image_count = len(image_items) if isinstance(image_items, list) else 0
+    print(f"[chat-completion] stream success model={model} images={image_count}")
+
+    async def event_stream():
+        yield _encode_sse(
+            json.dumps(
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant"},
+                            "finish_reason": None,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+        for part in _iter_text_chunks(content):
+            yield _encode_sse(
+                json.dumps(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": part},
+                                "finish_reason": None,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        yield _encode_sse(
+            json.dumps(
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+        yield _encode_sse("[DONE]")
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _is_upload_file(value: object) -> bool:
@@ -356,7 +455,12 @@ def create_app() -> FastAPI:
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
-        return await run_in_threadpool(chatgpt_service.create_image_completion, body.model_dump(mode="python"))
+        payload = body.model_dump(mode="python")
+        stream = bool(payload.get("stream"))
+        completion = await run_in_threadpool(chatgpt_service.create_image_completion, payload)
+        if stream:
+            return _build_chat_completion_stream_response(completion)
+        return completion
 
     @router.post("/v1/responses")
     async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):

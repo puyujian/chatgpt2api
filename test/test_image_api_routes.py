@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
@@ -148,7 +149,16 @@ def test_chat_completions_accepts_image_inputs(monkeypatch) -> None:
         captured["prompt"] = prompt
         captured["model"] = model
         captured["input_images"] = input_images or []
-        return {"created": 2, "data": [{"b64_json": "ZmFrZQ==", "revised_prompt": prompt}]}
+        return {
+            "created": 2,
+            "data": [
+                {
+                    "b64_json": "ZmFrZQ==",
+                    "revised_prompt": prompt,
+                    "url": "https://example.com/image.png",
+                }
+            ],
+        }
 
     monkeypatch.setattr(api_module, "start_limited_account_watcher", lambda stop_event: _DummyThread())
     monkeypatch.setattr(ChatGPTService, "generate_with_pool", fake_generate_with_pool)
@@ -171,14 +181,17 @@ def test_chat_completions_accepts_image_inputs(monkeypatch) -> None:
             },
         )
 
+    payload = response.json()
     assert response.status_code == 200
     assert captured["prompt"] == "参考这张图，改成漫画"
     assert captured["model"] == "gpt-image-1"
     assert len(captured["input_images"]) == 1
-    assert response.json()["choices"][0]["message"]["images"][0]["b64_json"] == "ZmFrZQ=="
+    assert payload["choices"][0]["message"]["images"][0]["b64_json"] == "ZmFrZQ=="
+    assert payload["choices"][0]["message"]["images"][0]["url"] == "https://example.com/image.png"
+    assert "https://example.com/image.png" in payload["choices"][0]["message"]["content"]
 
 
-def test_chat_completions_ignores_stream_flag_for_image_requests(monkeypatch) -> None:
+def test_chat_completions_streams_sse_for_image_requests(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_generate_with_pool(self, prompt, model, n, input_images=None):
@@ -213,13 +226,27 @@ def test_chat_completions_ignores_stream_flag_for_image_requests(monkeypatch) ->
             },
         )
 
-    payload = response.json()
     assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
     assert captured["prompt"] == "保留主体，改成电影海报"
     assert captured["model"] == "gpt-image-2"
     assert len(captured["input_images"]) == 1
-    assert payload["model"] == "gpt-image-2"
-    assert payload["choices"][0]["message"]["images"][0]["b64_json"] == "ZmFrZQ=="
+    events = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+    assert events[-1] == "[DONE]"
+
+    first_chunk = json.loads(events[0])
+    assert first_chunk["model"] == "gpt-image-2"
+    assert first_chunk["choices"][0]["delta"]["role"] == "assistant"
+
+    content = "".join(
+        json.loads(item)["choices"][0]["delta"].get("content", "")
+        for item in events[1:-1]
+        if item != "[DONE]"
+    )
+    assert "https://example.com/stream.png" in content
+
+    finish_chunk = json.loads(events[-2])
+    assert finish_chunk["choices"][0]["finish_reason"] == "stop"
 
 
 def test_chat_completions_accepts_non_image_model_when_message_has_image_inputs(monkeypatch) -> None:

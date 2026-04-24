@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import type { ClipboardEvent, DragEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
@@ -43,6 +44,9 @@ const imageModelOptions: Array<{ label: string; value: ImageModel }> = [
   { label: "gpt-image-1", value: "gpt-image-1" },
   { label: "gpt-image-2", value: "gpt-image-2" },
 ];
+
+const maxReferenceImageCount = 4;
+const acceptedReferenceImageTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 function buildConversationTitle(prompt: string) {
   const trimmed = prompt.trim();
@@ -116,6 +120,20 @@ function readFileAsDataUrl(file: File) {
   });
 }
 
+function getImageFiles(files: Iterable<File>) {
+  return Array.from(files).filter((file) => acceptedReferenceImageTypes.has(file.type));
+}
+
+function getClipboardImageFiles(items: DataTransferItemList) {
+  return Array.from(items).flatMap((item) => {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) {
+      return [];
+    }
+    const file = item.getAsFile();
+    return file ? [file] : [];
+  });
+}
+
 type PreviewImage = {
   alt: string;
   src: string;
@@ -138,10 +156,12 @@ export default function ImagePage() {
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isDraggingReferenceImage, setIsDraggingReferenceImage] = useState(false);
   const [availableQuota, setAvailableQuota] = useState("加载中");
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const resultsViewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const dragDepthRef = useRef(0);
 
   const parsedCount = useMemo(() => Math.max(1, Math.min(10, Number(imageCount) || 1)), [imageCount]);
   const selectedConversation = useMemo(
@@ -302,28 +322,99 @@ export default function ImagePage() {
     textareaRef.current?.focus();
   };
 
-  const handleReferenceImageChange = async (fileList: FileList | null) => {
-    const files = Array.from(fileList || []);
+  const handleReferenceImageUpload = async (files: File[], source: "选择" | "拖放" | "粘贴" = "选择") => {
     if (files.length === 0) {
+      return;
+    }
+
+    const imageFiles = getImageFiles(files);
+    if (imageFiles.length === 0) {
+      toast.error("请上传 PNG、JPG、WEBP 或 GIF 图片");
+      return;
+    }
+
+    const remainingCount = maxReferenceImageCount - referenceImages.length;
+    if (remainingCount <= 0) {
+      toast.error(`最多只能上传 ${maxReferenceImageCount} 张参考图`);
       return;
     }
 
     try {
       const uploaded = await Promise.all(
-        files.slice(0, 4).map(async (file) => ({
+        imageFiles.slice(0, remainingCount).map(async (file, index) => ({
           id:
             typeof crypto !== "undefined" && "randomUUID" in crypto
               ? crypto.randomUUID()
               : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-          name: file.name,
+          name: file.name || `${source}图片-${index + 1}.png`,
           data_url: await readFileAsDataUrl(file),
         })),
       );
-      setReferenceImages((prev) => [...prev, ...uploaded].slice(0, 4));
+      setReferenceImages((prev) => [...prev, ...uploaded].slice(0, maxReferenceImageCount));
+      toast.success(`${source}上传 ${uploaded.length} 张参考图`);
+      if (imageFiles.length > remainingCount) {
+        toast.info(`最多保留 ${maxReferenceImageCount} 张参考图，已忽略多余图片`);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "读取参考图失败";
       toast.error(message);
     }
+  };
+
+  const handleReferenceImageChange = async (fileList: FileList | null) => {
+    await handleReferenceImageUpload(Array.from(fileList || []));
+  };
+
+  const handleReferenceImagePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = getClipboardImageFiles(event.clipboardData.items);
+    if (files.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    void handleReferenceImageUpload(files, "粘贴");
+  };
+
+  const handleReferenceImageDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDraggingReferenceImage(true);
+  };
+
+  const handleReferenceImageDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleReferenceImageDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDraggingReferenceImage(false);
+    }
+  };
+
+  const handleReferenceImageDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDraggingReferenceImage(false);
+    void handleReferenceImageUpload(Array.from(event.dataTransfer.files), "拖放");
   };
 
   const handleRemoveReferenceImage = (id: string) => {
@@ -701,9 +792,22 @@ export default function ImagePage() {
 
           <div className="shrink-0 flex justify-center">
             <div
-              className="overflow-hidden rounded-[32px] border border-stone-200/80 bg-white shadow-[0_18px_48px_rgba(28,25,23,0.08)] transition focus-within:border-stone-300 focus-within:shadow-[0_20px_56px_rgba(28,25,23,0.12)]"
+              className={cn(
+                "relative overflow-hidden rounded-[32px] border border-stone-200/80 bg-white shadow-[0_18px_48px_rgba(28,25,23,0.08)] transition focus-within:border-stone-300 focus-within:shadow-[0_20px_56px_rgba(28,25,23,0.12)]",
+                isDraggingReferenceImage &&
+                  "border-stone-900 bg-stone-50 shadow-[0_22px_64px_rgba(28,25,23,0.16)]",
+              )}
               style={{ width: "min(980px, 100%)" }}
+              onDragEnter={handleReferenceImageDragEnter}
+              onDragOver={handleReferenceImageDragOver}
+              onDragLeave={handleReferenceImageDragLeave}
+              onDrop={handleReferenceImageDrop}
             >
+              {isDraggingReferenceImage ? (
+                <div className="pointer-events-none absolute inset-2 z-10 flex items-center justify-center rounded-[26px] border-2 border-dashed border-stone-400 bg-white/80 text-sm font-medium text-stone-700 backdrop-blur-sm">
+                  松开鼠标上传参考图
+                </div>
+              ) : null}
               <div
                 className="flex cursor-text flex-col"
                 onClick={() => {
@@ -714,6 +818,7 @@ export default function ImagePage() {
                   ref={textareaRef}
                   value={imagePrompt}
                   onChange={(event) => setImagePrompt(event.target.value)}
+                  onPaste={handleReferenceImagePaste}
                   placeholder="输入你想要生成的画面"
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.shiftKey) {
@@ -790,7 +895,7 @@ export default function ImagePage() {
                       }}
                     >
                       <ImagePlus className="size-4" />
-                      参考图
+                      参考图 / 拖拽 / 粘贴
                     </Button>
                     <Select value={imageModel} onValueChange={(value) => setImageModel(value as ImageModel)}>
                       <SelectTrigger className="h-10 w-[164px] rounded-full border-stone-200 bg-white text-sm font-medium text-stone-700 shadow-none focus-visible:ring-0">

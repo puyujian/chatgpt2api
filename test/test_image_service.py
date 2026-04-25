@@ -149,3 +149,30 @@ def test_download_as_base64_refreshes_download_url_after_404() -> None:
         "https://example.com/expired.png",
         "https://example.com/fresh.png",
     ]
+
+
+def test_fetch_generated_image_bytes_uses_refreshable_download_url(monkeypatch) -> None:
+    session = _FakeSession()
+
+    monkeypatch.setattr(image_service, "_new_session", lambda access_token: (session, {}))
+    monkeypatch.setattr(
+        image_service,
+        "_fetch_download_url",
+        lambda session_obj, access_token, device_id, conversation_id, file_id: "https://example.com/generated.png",
+    )
+    monkeypatch.setattr(
+        image_service,
+        "_download_image_bytes",
+        lambda session_obj, download_url, refresh_download_url=None: (b"PNGDATA", "image/png"),
+    )
+
+    content, content_type = image_service.fetch_generated_image_bytes(
+        "token",
+        "device-123",
+        "conv_123",
+        "file_123",
+    )
+
+    assert content == b"PNGDATA"
+    assert content_type == "image/png"
+    assert session.closed is True

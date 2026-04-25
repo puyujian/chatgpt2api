@@ -10,13 +10,15 @@ from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, UploadFi
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService
 from services.config import config
 from services.cpa_service import cpa_config, cpa_service, fetch_pool_status, fetch_tokens_for_pool
+from services.image_proxy_service import fetch_public_image
+from services.image_service import ImageGenerationError
 from services.image_task_service import ImageTaskService
 from services.usage_log_service import usage_log_service
 from services.utils import InputImage, build_input_image_from_bytes
@@ -480,11 +482,19 @@ def create_app() -> FastAPI:
         )
 
     @router.post("/v1/chat/completions")
-    async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
+    async def create_chat_completion(
+        body: ChatCompletionRequest,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
         require_auth_key(authorization)
         payload = body.model_dump(mode="python")
         stream = bool(payload.get("stream"))
-        completion = await run_in_threadpool(chatgpt_service.create_image_completion, payload)
+        completion = await run_in_threadpool(
+            chatgpt_service.create_image_completion,
+            payload,
+            public_base_url=str(request.base_url),
+        )
         if stream:
             return _build_chat_completion_stream_response(completion)
         return completion
@@ -593,6 +603,21 @@ def create_app() -> FastAPI:
         require_auth_key(authorization)
         removed = usage_log_service.clear()
         return {"removed": removed}
+
+    @router.get("/public-images/{image_id}")
+    async def get_public_image(image_id: str):
+        try:
+            result = await run_in_threadpool(fetch_public_image, image_id)
+        except ImageGenerationError as exc:
+            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail={"error": "image link is unavailable"})
+        content, content_type = result
+        return Response(
+            content=content,
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
 
     app.include_router(router)
 

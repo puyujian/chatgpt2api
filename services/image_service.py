@@ -587,6 +587,20 @@ def _download_as_base64(
     *,
     refresh_download_url: Callable[[], str] | None = None,
 ) -> str:
+    image_bytes, _ = _download_image_bytes(
+        session,
+        download_url,
+        refresh_download_url=refresh_download_url,
+    )
+    return base64.b64encode(image_bytes).decode("ascii")
+
+
+def _download_image_bytes(
+    session: Session,
+    download_url: str,
+    *,
+    refresh_download_url: Callable[[], str] | None = None,
+) -> tuple[bytes, str]:
     max_attempts = 3
     last_detail = "unknown"
     current_download_url = download_url
@@ -594,8 +608,10 @@ def _download_as_base64(
         try:
             response = session.get(current_download_url, timeout=(10, 120))
             content = response.content or b""
+            content_type = str((response.headers or {}).get("content-type") or "").strip()
             if response.ok and content:
-                return base64.b64encode(content).decode("ascii")
+                normalized_content_type = content_type.split(";", 1)[0].strip() or "application/octet-stream"
+                return content, normalized_content_type
             last_detail = _build_download_error_detail(response)
             if attempt < max_attempts and refresh_download_url is not None:
                 refreshed_url = str(refresh_download_url() or "").strip()
@@ -610,6 +626,44 @@ def _download_as_base64(
         if attempt < max_attempts:
             time.sleep((2 ** (attempt - 1)) * 0.5 + random.uniform(0, 0.25))
     raise ImageGenerationError(f"download image failed ({last_detail})")
+
+
+def fetch_generated_image_bytes(
+    access_token: str,
+    device_id: str,
+    conversation_id: str,
+    file_id: str,
+    *,
+    download_url: str = "",
+) -> tuple[bytes, str]:
+    session, _ = _new_session(access_token)
+    try:
+        current_download_url = str(download_url or "").strip() or _fetch_download_url(
+            session,
+            access_token,
+            device_id,
+            conversation_id,
+            file_id,
+        )
+        if not current_download_url:
+            raise ImageGenerationError("failed to get download url")
+
+        def _refresh_download_url() -> str:
+            return _fetch_download_url(
+                session,
+                access_token,
+                device_id,
+                conversation_id,
+                file_id,
+            )
+
+        return _download_image_bytes(
+            session,
+            current_download_url,
+            refresh_download_url=_refresh_download_url,
+        )
+    finally:
+        session.close()
 
 
 def _resolve_upstream_model(access_token: str, requested_model: str) -> str:
@@ -724,6 +778,12 @@ def generate_image_result(
                     "b64_json": result.b64_json,
                     "revised_prompt": result.revised_prompt,
                     "url": result.url,
+                    "_public_image_ref": {
+                        "access_token": access_token,
+                        "device_id": device_id,
+                        "conversation_id": actual_conversation_id,
+                        "file_id": first_file_id,
+                    },
                 }
             ],
         }

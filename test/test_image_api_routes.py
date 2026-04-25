@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 from threading import Event
@@ -350,6 +351,66 @@ def test_chat_completions_streams_sse_for_image_requests(monkeypatch) -> None:
 
     finish_chunk = json.loads(events[-2])
     assert finish_chunk["choices"][0]["finish_reason"] == "stop"
+
+
+def test_chat_completions_rewrites_images_to_public_proxy_url(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    png_bytes = base64.b64decode(PNG_DATA_URL.split(",", 1)[1])
+
+    def fake_generate_with_pool(self, prompt, model, n, input_images=None):
+        return {
+            "created": 8,
+            "data": [
+                {
+                    "b64_json": "ZmFrZQ==",
+                    "revised_prompt": prompt,
+                    "url": "https://chatgpt.com/backend-api/estuary/content?id=file_123",
+                    "_public_image_ref": {
+                        "access_token": "token-123",
+                        "device_id": "device-123",
+                        "conversation_id": "conv_123",
+                        "file_id": "file_123",
+                        "download_url": "https://chatgpt.com/backend-api/estuary/content?id=file_123",
+                    },
+                }
+            ],
+        }
+
+    def fake_fetch_public_image(image_id: str):
+        captured["image_id"] = image_id
+        return png_bytes, "image/png"
+
+    monkeypatch.setattr(api_module, "start_limited_account_watcher", lambda stop_event: _DummyThread())
+    monkeypatch.setattr(ChatGPTService, "generate_with_pool", fake_generate_with_pool)
+    monkeypatch.setattr(api_module, "fetch_public_image", fake_fetch_public_image)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers=_auth_headers(),
+            json={
+                "model": "gpt-image-2",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "猫猫",
+                    }
+                ],
+            },
+        )
+
+        payload = response.json()
+        content = payload["choices"][0]["message"]["content"]
+        public_url = payload["choices"][0]["message"]["images"][0]["url"]
+        image_response = client.get(public_url.removeprefix("http://testserver"))
+
+    assert response.status_code == 200
+    assert public_url.startswith("http://testserver/public-images/")
+    assert public_url in content
+    assert image_response.status_code == 200
+    assert image_response.headers["content-type"] == "image/png"
+    assert image_response.content == png_bytes
+    assert captured["image_id"]
 
 
 def test_chat_completions_accepts_non_image_model_when_message_has_image_inputs(monkeypatch) -> None:

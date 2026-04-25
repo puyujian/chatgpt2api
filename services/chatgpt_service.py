@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from services.account_service import AccountService
 from services.cpa_service import cpa_service
+from services.image_proxy_service import register_public_image_ref
 from services.image_service import ImageGenerationError, generate_image_result, is_token_invalid_error
 from services.usage_log_service import usage_log_service
 from services.utils import (
@@ -325,7 +326,37 @@ class ChatGPTService:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
         return self._format_image_generation_result(image_result, response_format=response_format)
 
-    def create_image_completion(self, body: dict[str, object]) -> dict[str, object]:
+    def _apply_public_image_urls(
+        self,
+        image_result: dict[str, object],
+        *,
+        public_base_url: str | None = None,
+    ) -> dict[str, object]:
+        base_url = str(public_base_url or "").strip()
+        if not base_url:
+            return image_result
+
+        image_items = image_result.get("data")
+        if not isinstance(image_items, list):
+            return image_result
+
+        for item in image_items:
+            if not isinstance(item, dict):
+                continue
+            raw_ref = item.get("_public_image_ref")
+            if not isinstance(raw_ref, dict):
+                continue
+            public_url = register_public_image_ref(base_url, raw_ref)
+            if public_url:
+                item["url"] = public_url
+        return image_result
+
+    def create_image_completion(
+        self,
+        body: dict[str, object],
+        *,
+        public_base_url: str | None = None,
+    ) -> dict[str, object]:
         if not is_image_chat_request(body):
             raise HTTPException(
                 status_code=400,
@@ -349,6 +380,7 @@ class ChatGPTService:
         except ImageGenerationError as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
+        image_result = self._apply_public_image_urls(image_result, public_base_url=public_base_url)
         return build_chat_image_completion(requested_model, prompt, image_result)
 
     def create_response(self, body: dict[str, object]) -> dict[str, object]:

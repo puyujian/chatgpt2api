@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from threading import Event
 
+from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from starlette.requests import Request
@@ -26,6 +29,106 @@ class _DummyThread:
 
 def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {config.auth_key}"}
+
+
+def _wait_for_image_task(client: TestClient, task_id: str) -> dict[str, object]:
+    deadline = time.time() + 3
+    payload: dict[str, object] = {}
+    while time.time() < deadline:
+        response = client.get(f"/api/image-tasks/{task_id}", headers=_auth_headers())
+        assert response.status_code == 200
+        payload = response.json()
+        if payload["status"] in {"success", "error"}:
+            return payload
+        time.sleep(0.05)
+    raise AssertionError(f"image task did not finish: {payload}")
+
+
+def test_image_task_route_runs_generation_in_background(monkeypatch) -> None:
+    gate = Event()
+    calls: list[dict[str, object]] = []
+
+    def fake_create_image_generation(self, body, *, require_input_images=False):
+        calls.append(dict(body))
+        gate.wait(timeout=2)
+        return {
+            "created": 10,
+            "data": [
+                {
+                    "b64_json": f"ZmFrZQ{len(calls)}==",
+                    "revised_prompt": body["prompt"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(api_module, "start_limited_account_watcher", lambda stop_event: _DummyThread())
+    monkeypatch.setattr(ChatGPTService, "create_image_generation", fake_create_image_generation)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/api/image-tasks",
+            headers=_auth_headers(),
+            json={
+                "task_id": "task-background",
+                "prompt": "生成两张海报",
+                "model": "gpt-image-2",
+                "n": 2,
+            },
+        )
+
+        assert response.status_code == 200
+        created = response.json()
+        assert created["id"] == "task-background"
+        assert created["status"] == "queued"
+        assert [image["status"] for image in created["images"]] == ["loading", "loading"]
+
+        status_response = client.get("/api/image-tasks/task-background", headers=_auth_headers())
+        assert status_response.status_code == 200
+        assert status_response.json()["status"] in {"queued", "generating"}
+
+        gate.set()
+        payload = _wait_for_image_task(client, "task-background")
+
+    assert payload["status"] == "success"
+    assert [image["status"] for image in payload["images"]] == ["success", "success"]
+    assert [call["n"] for call in calls] == [1, 1]
+    assert calls[0]["model"] == "gpt-image-2"
+
+
+def test_image_task_route_keeps_partial_failures(monkeypatch) -> None:
+    calls = 0
+
+    def fake_create_image_generation(self, body, *, require_input_images=False):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise HTTPException(status_code=502, detail={"error": "upstream failed"})
+        return {
+            "created": 10,
+            "data": [{"b64_json": "ZmFrZQ==", "revised_prompt": body["prompt"]}],
+        }
+
+    monkeypatch.setattr(api_module, "start_limited_account_watcher", lambda stop_event: _DummyThread())
+    monkeypatch.setattr(ChatGPTService, "create_image_generation", fake_create_image_generation)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/api/image-tasks",
+            headers=_auth_headers(),
+            json={
+                "task_id": "task-partial",
+                "prompt": "生成两张海报",
+                "n": 2,
+            },
+        )
+
+        assert response.status_code == 200
+        payload = _wait_for_image_task(client, "task-partial")
+
+    assert payload["status"] == "error"
+    assert payload["error"] == "其中 1 张生成失败"
+    assert [image["status"] for image in payload["images"]] == ["success", "error"]
+    assert payload["images"][1]["error"] == "upstream failed"
 
 
 def test_images_edits_route_passes_reference_images(monkeypatch) -> None:

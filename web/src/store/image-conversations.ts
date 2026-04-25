@@ -21,6 +21,7 @@ export type ImageConversationStatus = "generating" | "success" | "error";
 
 export type ImageConversation = {
   id: string;
+  taskId?: string;
   title: string;
   prompt: string;
   model: ImageModel;

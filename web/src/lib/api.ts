@@ -67,6 +67,28 @@ export type ReferenceImageInput = {
   name?: string;
 };
 
+export type ImageTaskStatus = "queued" | "generating" | "success" | "error";
+
+export type ImageTaskImage = {
+  id: string;
+  status: "loading" | "success" | "error";
+  b64_json?: string;
+  revised_prompt?: string;
+  error?: string;
+};
+
+export type ImageTask = {
+  id: string;
+  status: ImageTaskStatus;
+  prompt: string;
+  model: ImageModel;
+  count: number;
+  images: ImageTaskImage[];
+  created_at: string;
+  updated_at: string;
+  error?: string;
+};
+
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
   return httpRequest<{ ok: boolean }>("/auth/login", {
@@ -140,6 +162,30 @@ export async function generateImage(
       },
     },
   );
+}
+
+export async function createImageTask(
+  taskId: string,
+  prompt: string,
+  model: ImageModel = "gpt-image-1",
+  count = 1,
+  referenceImages: ReferenceImageInput[] = [],
+) {
+  return httpRequest<ImageTask>("/api/image-tasks", {
+    method: "POST",
+    body: {
+      task_id: taskId,
+      prompt,
+      model,
+      n: count,
+      response_format: "b64_json",
+      images: referenceImages,
+    },
+  });
+}
+
+export async function fetchImageTask(taskId: string) {
+  return httpRequest<ImageTask>(`/api/image-tasks/${encodeURIComponent(taskId)}`);
 }
 
 export async function fetchCPAPools() {

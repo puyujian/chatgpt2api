@@ -17,6 +17,7 @@ from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService
 from services.config import config
 from services.cpa_service import cpa_config, cpa_service, fetch_pool_status, fetch_tokens_for_pool
+from services.image_task_service import ImageTaskService
 from services.usage_log_service import usage_log_service
 from services.utils import InputImage, build_input_image_from_bytes
 from services.version import get_app_version
@@ -35,6 +36,18 @@ class ImageGenerationRequest(BaseModel):
     n: int = Field(default=1, ge=1, le=4)
     response_format: str = "b64_json"
     history_disabled: bool = True
+    image: object | None = None
+    images: list[object] | None = None
+
+
+class ImageTaskCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    task_id: str | None = None
+    prompt: str = Field(..., min_length=1)
+    model: str = "gpt-image-1"
+    n: int = Field(default=1, ge=1, le=10)
+    response_format: str = "b64_json"
     image: object | None = None
     images: list[object] | None = None
 
@@ -344,6 +357,7 @@ def resolve_web_asset(requested_path: str) -> Path | None:
 
 def create_app() -> FastAPI:
     chatgpt_service = ChatGPTService(account_service)
+    image_task_service = ImageTaskService(chatgpt_service)
     app_version = get_app_version()
 
     @asynccontextmanager
@@ -353,6 +367,7 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            image_task_service.shutdown()
             stop_event.set()
             thread.join(timeout=1)
 
@@ -435,6 +450,18 @@ def create_app() -> FastAPI:
         if account is None:
             raise HTTPException(status_code=404, detail={"error": "account not found"})
         return {"item": account, "items": account_service.list_accounts()}
+
+    @router.post("/api/image-tasks")
+    async def create_image_task(body: ImageTaskCreateRequest, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        payload = body.model_dump(mode="python", exclude_none=True)
+        task_id = payload.pop("task_id", None)
+        return image_task_service.create_task(payload, task_id=task_id)
+
+    @router.get("/api/image-tasks/{task_id}")
+    async def get_image_task(task_id: str, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        return image_task_service.get_task(task_id)
 
     @router.post("/v1/images/generations")
     async def generate_images(request: Request, authorization: str | None = Header(default=None)):

@@ -28,7 +28,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { fetchAccounts, generateImage, type Account, type ImageModel } from "@/lib/api";
+import { createImageTask, fetchAccounts, fetchImageTask, type Account, type ImageModel, type ImageTask } from "@/lib/api";
 import {
   clearImageConversations,
   deleteImageConversation,
@@ -74,26 +74,100 @@ function formatAvailableQuota(accounts: Account[]) {
   return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
 }
 
+function markConversationInterrupted(item: ImageConversation): ImageConversation {
+  return {
+    ...item,
+    status: "error",
+    error: item.images.some((image) => image.status === "success")
+      ? item.error || "生成已中断"
+      : "页面已刷新，生成已中断",
+    images: item.images.map((image) =>
+      image.status === "loading"
+        ? {
+            ...image,
+            status: "error",
+            error: "页面已刷新，生成已中断",
+          }
+        : image,
+    ),
+  };
+}
+
+function markConversationFailed(item: ImageConversation, error: string): ImageConversation {
+  return {
+    ...item,
+    status: "error",
+    error,
+    images: item.images.map((image) =>
+      image.status === "loading"
+        ? {
+            ...image,
+            status: "error",
+            error,
+          }
+        : image,
+    ),
+  };
+}
+
+function mergeImageTask(conversation: ImageConversation, task: ImageTask): ImageConversation {
+  const taskStatus = task.status === "success" ? "success" : task.status === "error" ? "error" : "generating";
+  const baseImages: StoredImage[] =
+    conversation.images.length > 0
+      ? conversation.images
+      : Array.from({ length: task.count }, (_, index) => ({
+          id: `${conversation.id}-${index}`,
+          status: "loading" as const,
+        }));
+
+  let changed =
+    conversation.taskId !== task.id ||
+    conversation.status !== taskStatus ||
+    (conversation.error || undefined) !== (task.error || undefined) ||
+    conversation.count !== task.count;
+
+  const images = baseImages.map((image, index) => {
+    const taskImage = task.images[index];
+    if (!taskImage) {
+      return image;
+    }
+    const nextImage: StoredImage = {
+      id: image.id,
+      status: taskImage.status,
+      b64_json: taskImage.b64_json,
+      error: taskImage.error,
+    };
+    if (
+      image.status !== nextImage.status ||
+      image.b64_json !== nextImage.b64_json ||
+      image.error !== nextImage.error
+    ) {
+      changed = true;
+    }
+    return nextImage;
+  });
+
+  if (!changed) {
+    return conversation;
+  }
+
+  return {
+    ...conversation,
+    taskId: task.id,
+    count: task.count,
+    status: taskStatus,
+    error: task.error || undefined,
+    images,
+  };
+}
+
+function isFinalTask(task: ImageTask) {
+  return task.status === "success" || task.status === "error";
+}
+
 async function normalizeConversationHistory(items: ImageConversation[]) {
   const normalized = items.map((item) =>
-    item.status === "generating"
-      ? {
-          ...item,
-          status: "error" as const,
-          error: item.images.some((image) => image.status === "success")
-            ? item.error || "生成已中断"
-            : "页面已刷新，生成已中断",
-          images: item.images.map((image) =>
-            image.status === "loading"
-              ? {
-                  ...image,
-                  status: "error" as const,
-                  error: "页面已刷新，生成已中断",
-                }
-              : image,
-          ),
-        }
-      : item,
+    item.status === "generating" && !item.taskId ? markConversationInterrupted(item) : item,
   );
 
   await Promise.all(
@@ -180,6 +254,7 @@ export default function ImagePage() {
           return;
         }
         setConversations(normalizedItems);
+        setSelectedConversationId((current) => current ?? normalizedItems[0]?.id ?? null);
       } catch (error) {
         const message = error instanceof Error ? error.message : "读取会话记录失败";
         toast.error(message);
@@ -289,31 +364,93 @@ export default function ImagePage() {
     document.body.removeChild(link);
   };
 
-  const persistConversation = async (conversation: ImageConversation) => {
+  const persistConversation = useCallback(async (conversation: ImageConversation) => {
     setConversations((prev) => {
       const next = [conversation, ...prev.filter((item) => item.id !== conversation.id)];
       return next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     });
     await saveImageConversation(conversation);
-  };
+  }, []);
 
-  const updateConversation = async (
+  const updateConversation = useCallback(async (
     conversationId: string,
-    updater: (current: ImageConversation | null) => ImageConversation,
+    updater: (current: ImageConversation | null) => ImageConversation | null,
   ) => {
     let nextConversation: ImageConversation | null = null;
+    let shouldSave = false;
 
     setConversations((prev) => {
       const current = prev.find((item) => item.id === conversationId) ?? null;
-      nextConversation = updater(current);
-      const next = [nextConversation, ...prev.filter((item) => item.id !== conversationId)];
+      const nextItem = updater(current);
+      if (!nextItem) {
+        return prev;
+      }
+      nextConversation = nextItem;
+      if (current && nextItem === current) {
+        return prev;
+      }
+      shouldSave = true;
+      const next = [nextItem, ...prev.filter((item) => item.id !== conversationId)];
       return next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     });
 
-    if (nextConversation) {
+    if (nextConversation && shouldSave) {
       await saveImageConversation(nextConversation);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    const activeConversations = conversations.filter(
+      (conversation) => conversation.status === "generating" && Boolean(conversation.taskId),
+    );
+    if (activeConversations.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncTasks = async () => {
+      await Promise.all(
+        activeConversations.map(async (conversation) => {
+          const taskId = conversation.taskId;
+          if (!taskId) {
+            return;
+          }
+
+          try {
+            const task = await fetchImageTask(taskId);
+            if (cancelled) {
+              return;
+            }
+            await updateConversation(conversation.id, (current) =>
+              current ? mergeImageTask(current, task) : null,
+            );
+            if (isFinalTask(task)) {
+              await loadQuota();
+            }
+          } catch (error) {
+            if (cancelled) {
+              return;
+            }
+            const message = error instanceof Error ? error.message : "读取生成任务状态失败";
+            await updateConversation(conversation.id, (current) =>
+              current ? markConversationFailed(current, message) : null,
+            );
+          }
+        }),
+      );
+    };
+
+    void syncTasks();
+    const timer = window.setInterval(() => {
+      void syncTasks();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [conversations, loadQuota, updateConversation]);
 
   const handleCreateDraft = () => {
     setSelectedConversationId(null);
@@ -462,6 +599,7 @@ export default function ImagePage() {
         : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const draftConversation: ImageConversation = {
       id: conversationId,
+      taskId: conversationId,
       title: buildConversationTitle(prompt),
       prompt,
       model: imageModel,
@@ -482,84 +620,34 @@ export default function ImagePage() {
 
     try {
       await persistConversation(draftConversation);
+      const task = await createImageTask(
+        conversationId,
+        prompt,
+        imageModel,
+        parsedCount,
+        draftConversation.referenceImages.map((image) => ({
+          data_url: image.data_url,
+          name: image.name,
+        })),
+      );
 
-      const tasks = Array.from({ length: parsedCount }, async (_, index) => {
-        try {
-          const data = await generateImage(
-            prompt,
-            imageModel,
-            draftConversation.referenceImages.map((image) => ({
-              data_url: image.data_url,
-              name: image.name,
-            })),
-          );
-          const first = data.data?.[0];
-          if (!first?.b64_json) {
-            throw new Error(`第 ${index + 1} 张没有返回图片数据`);
-          }
+      await updateConversation(conversationId, (current) =>
+        current ? mergeImageTask(current, task) : null,
+      );
 
-          const nextImage: StoredImage = {
-            id: `${conversationId}-${index}`,
-            status: "success",
-            b64_json: first.b64_json,
-          };
-
-          await updateConversation(conversationId, (current) => ({
-            ...(current ?? draftConversation),
-            images: (current?.images ?? draftConversation.images).map((image) =>
-              image.id === nextImage.id ? nextImage : image,
-            ),
-          }));
-
-          return nextImage;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : `第 ${index + 1} 张生成失败`;
-          const failedImage: StoredImage = {
-            id: `${conversationId}-${index}`,
-            status: "error",
-            error: message,
-          };
-
-          await updateConversation(conversationId, (current) => ({
-            ...(current ?? draftConversation),
-            images: (current?.images ?? draftConversation.images).map((image) =>
-              image.id === failedImage.id ? failedImage : image,
-            ),
-          }));
-
-          throw error;
+      if (isFinalTask(task)) {
+        await loadQuota();
+        if (task.status === "success") {
+          toast.success(`已生成 ${task.images.filter((image) => image.status === "success").length} 张图片`);
+        } else {
+          toast.error(task.error || "生成图片失败");
         }
-      });
-
-      const settled = await Promise.allSettled(tasks);
-      const successCount = settled.filter((item): item is PromiseFulfilledResult<StoredImage> => item.status === "fulfilled")
-        .length;
-      const failedCount = settled.length - successCount;
-
-      if (successCount === 0) {
-        const firstError = settled.find((item) => item.status === "rejected");
-        throw new Error(firstError?.status === "rejected" ? String(firstError.reason) : "生成图片失败");
-      }
-
-      await updateConversation(conversationId, (current) => ({
-        ...(current ?? draftConversation),
-        status: failedCount > 0 ? "error" : "success",
-        error: failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
-      }));
-      await loadQuota();
-
-      if (failedCount > 0) {
-        toast.error(`已完成 ${successCount} 张，另有 ${failedCount} 张未生成成功`);
       } else {
-        toast.success(`已生成 ${successCount} 张图片`);
+        toast.success("已提交生成任务");
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "生成图片失败";
-      await persistConversation({
-        ...draftConversation,
-        status: "error",
-        error: message,
-      });
+      await persistConversation(markConversationFailed(draftConversation, message));
       toast.error(message);
     } finally {
       setIsGenerating(false);
